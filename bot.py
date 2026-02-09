@@ -17,14 +17,14 @@ client = AsyncOpenAI(
     base_url="https://api.deepseek.com/v1"
 )
 
-@dp.message(Command("start")
+@dp.message(Command("start"))
 async def start_handler(message: Message):
     if message.from_user.id != ALLOWED_USER_ID:
         return
     await message.answer(
-        "?? à¨¢¥â! Ÿ - ˆˆ- áá¨áâ¥­â €ª ¤¥¬¨ª  Fallout.\n\n"
+        "ğŸ‘‹ ĞŸÑ€Ğ¸Ğ²ĞµÑ‚! Ğ¯ â€” Ğ˜Ğ˜-Ğ°ÑÑĞ¸ÑÑ‚ĞµĞ½Ñ‚ ĞĞºĞ°Ğ´ĞµĞ¼Ğ¸ĞºĞ° Fallout.\n\n"
         "https://t.me/levperegrev\n\n"
-        "‡ ¤ ¢ © ¢®¯à®áë - ®â¢¥çã ç¥à¥§ DeepSeek!"
+        "Ğ—Ğ°Ğ´Ğ°Ğ²Ğ°Ğ¹ Ğ²Ğ¾Ğ¿Ñ€Ğ¾ÑÑ‹ â€” Ğ¾Ñ‚Ğ²ĞµÑ‡Ñƒ Ñ‡ĞµÑ€ĞµĞ· DeepSeek!"
     )
 
 @dp.message()
@@ -36,7 +36,7 @@ async def ai_handler(message: Message):
         response = await client.chat.completions.create(
             model="deepseek-chat",
             messages=[
-                {"role": "system", "content": "’ë ¤àã¦¥«î¡­ë©  áá¨áâ¥­â €ª ¤¥¬¨ª  Fallout. â¢¥ç © ªà âª® ­  àãááª®¬."},
+                {"role": "system", "content": "Ğ¢Ñ‹ Ğ´Ñ€ÑƒĞ¶ĞµĞ»ÑĞ±Ğ½Ñ‹Ğ¹ Ğ°ÑÑĞ¸ÑÑ‚ĞµĞ½Ñ‚ ĞĞºĞ°Ğ´ĞµĞ¼Ğ¸ĞºĞ° Fallout. ĞÑ‚Ğ²ĞµÑ‡Ğ°Ğ¹ ĞºÑ€Ğ°Ñ‚ĞºĞ¾ Ğ½Ğ° Ñ€ÑƒÑÑĞºĞ¾Ğ¼."},
                 {"role": "user", "content": message.text}
             ],
             temperature=0.7,
@@ -44,11 +44,11 @@ async def ai_handler(message: Message):
         )
         await message.answer(response.choices[0].message.content)
     except Exception as e:
-        await message.answer(f"? è¨¡ª : {str(e)}")
+        await message.answer(f"âŒ ĞÑˆĞ¸Ğ±ĞºĞ°: {str(e)}")
 
 async def main():
-    print("? Bot started on DeepSeek!")
+    print("âœ… Bot started on DeepSeek!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main()
+    asyncio.run(main())

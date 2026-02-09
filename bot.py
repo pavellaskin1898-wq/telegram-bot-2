@@ -36,14 +36,8 @@ async def ai_handler(message: Message):
         response = await client.chat.completions.create(
             model="deepseek-chat",
             messages=[
-                {
-                    "role": "system",
-                    "content": "Ты дружелюбный ассистент Академика Fallout. Отвечай кратко на русском."
-                },
-                {
-                    "role": "user",
-                    "content": message.text
-                }
+                {"role": "system", "content": "Ты дружелюбный ассистент Академика Fallout. Отвечай кратко на русском."},
+                {"role": "user", "content": message.text}
             ],
             temperature=0.7,
             max_tokens=512

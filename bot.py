@@ -12,9 +12,10 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID"))
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Исправленная инициализация для совместимости
 client = AsyncOpenAI(
     api_key=DEEPSEEK_API_KEY,
-    base_url="https://api.deepseek.com"
+    base_url="https://api.deepseek.com/v1"  # Важно: полный путь с /v1
 )
 
 @dp.message(Command("start"))

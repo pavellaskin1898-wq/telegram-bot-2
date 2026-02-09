@@ -1,8 +1,8 @@
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 from aiogram.filters import Command
-from openai import AsyncOpenAI
 import asyncio
+import aiohttp
 import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -12,10 +12,30 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID"))
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-client = AsyncOpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url="https://api.deepseek.com/v1"
-)
+async def get_deepseek_response(prompt: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": "Ты дружелюбный ассистент Академика Fallout. Отвечай кратко на русском."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 512
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers=headers,
+            json=data
+        ) as response:
+            result = await response.json()
+            return result["choices"][0]["message"]["content"]
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
@@ -33,21 +53,13 @@ async def ai_handler(message: Message):
         return
     try:
         await bot.send_chat_action(message.chat.id, "typing")
-        response = await client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "Ты дружелюбный ассистент Академика Fallout. Отвечай кратко на русском."},
-                {"role": "user", "content": message.text}
-            ],
-            temperature=0.7,
-            max_tokens=512
-        )
-        await message.answer(response.choices[0].message.content)
+        response = await get_deepseek_response(message.text)
+        await message.answer(response)
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
 async def main():
-    print("✅ Bot started on DeepSeek!")
+    print("✅ Bot started on DeepSeek only!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

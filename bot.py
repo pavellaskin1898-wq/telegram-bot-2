@@ -1,80 +1,77 @@
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message
-from aiogram.filters import Command
-import asyncio
-import aiohttp
 import os
+import asyncio
+import requests
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import CommandStart
+from aiogram.types import Message
+from aiogram.enums import ParseMode
 
+# === Переменные окружения ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID"))
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
-async def get_deepseek_response(prompt: str) -> str:
+
+# === Функция запроса к YandexGPT ===
+def get_ai_response(user_message: str) -> str:
+    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+
     headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
         "Content-Type": "application/json"
     }
-    
+
     data = {
-        "model": "deepseek-chat",
+        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite/latest",
+        "completionOptions": {
+            "stream": False,
+            "temperature": 0.6,
+            "maxTokens": 500
+        },
         "messages": [
-            {"role": "system", "content": "Ты дружелюбный ассистент Академика Fallout. Отвечай кратко на русском."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 512
+            {
+                "role": "system",
+                "text": "Ты умный Telegram-бот. Отвечай кратко и понятно."
+            },
+            {
+                "role": "user",
+                "text": user_message
+            }
+        ]
     }
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers=headers,
-                json=data
-            ) as response:
-                result = await response.json()
-                
-                # Проверяем, есть ли ошибка в ответе
-                if response.status != 200:
-                    return f"❌ Ошибка API: {result.get('error', {}).get('message', 'Неизвестная ошибка')}"
-                
-                # Проверяем, есть ли choices в ответе
-                if 'choices' not in result or not result['choices']:
-                    return f"❌ Нет ответа от модели. Ответ: {result}"
-                
-                # Возвращаем текст ответа
-                return result['choices'][0]['message']['content']
-                
-        except Exception as e:
-            return f"❌ Ошибка при запросе: {str(e)}"
 
-@dp.message(Command("start"))
+    response = requests.post(url, headers=headers, json=data)
+
+    if response.status_code != 200:
+        return f"Ошибка API:\n{response.text}"
+
+    result = response.json()
+    return result["result"]["alternatives"][0]["message"]["text"]
+
+
+# === Команда /start ===
+@dp.message(CommandStart())
 async def start_handler(message: Message):
-    if message.from_user.id != ALLOWED_USER_ID:
-        return
-    await message.answer(
-        "👋 Привет! Я — ИИ-ассистент Академика Fallout.\n\n"
-        "https://t.me/levperegrev\n\n"
-        "Задавай вопросы — отвечу через DeepSeek!"
-    )
+    await message.answer("Привет! Напиши мне что-нибудь 😊")
 
+
+# === Обработка обычных сообщений ===
 @dp.message()
-async def ai_handler(message: Message):
-    if message.from_user.id != ALLOWED_USER_ID:
-        return
-    try:
-        await bot.send_chat_action(message.chat.id, "typing")
-        response = await get_deepseek_response(message.text)
-        await message.answer(response)
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
+async def chat_handler(message: Message):
+    await message.answer("Думаю...")
 
+    ai_reply = get_ai_response(message.text)
+
+    await message.answer(ai_reply)
+
+
+# === Запуск ===
 async def main():
-    print("✅ Bot started on DeepSeek only!")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

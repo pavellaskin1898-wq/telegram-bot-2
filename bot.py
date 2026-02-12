@@ -1,47 +1,85 @@
-import os
-import requests
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message
+from aiogram.filters import Command
 import asyncio
+import aiohttp
+import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
+YC_API_KEY = os.getenv("YC_API_KEY")  # Твой новый ключ
+YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")  # Твой новый folder ID
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-def get_ai_response(user_message: str) -> str:
-    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+async def get_yandex_response(prompt: str) -> str:
     headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Authorization": f"Api-Key {YC_API_KEY}",
         "Content-Type": "application/json"
     }
+    
     data = {
-        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite/latest",
-        "completionOptions": {"stream": False, "temperature": 0.6, "maxTokens": 500},
+        "modelUri": f"gpt://{YC_FOLDER_ID}/yandexgpt-lite/latest",
+        "completionOptions": {
+            "temperature": 0.7,
+            "maxTokens": "512"
+        },
         "messages": [
-            {"role": "system", "text": "Ты полезный Telegram-бот. Отвечай кратко и понятно."},
-            {"role": "user", "text": user_message}
+            {
+                "role": "system",
+                "text": "Ты дружелюбный ассистент Академика Fallout. Отвечай кратко на русском."
+            },
+            {
+                "role": "user",
+                "text": prompt
+            }
         ]
     }
-    response = requests.post(url, headers=headers, json=data)
-    if response.status_code != 200:
-        return f"Ошибка API: {response.text}"
-    result = response.json()
-    return result["result"]["alternatives"][0]["message"]["text"]
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
+                headers=headers,
+                json=data
+            ) as response:
+                result = await response.json()
+                
+                if response.status != 200:
+                    return f"❌ Ошибка API: {result.get('error', {}).get('message', 'Неизвестная ошибка')}"
+                
+                if 'result' not in result or 'alternatives' not in result['result'] or not result['result']['alternatives']:
+                    return f"❌ Нет ответа от модели. Ответ: {result}"
+                
+                return result['result']['alternatives'][0]['message']['text']
+                
+        except Exception as e:
+            return f"❌ Ошибка при запросе: {str(e)}"
 
-@dp.message(CommandStart())
-async def start_handler(message: types.Message):
-    await message.answer("Привет! Напиши мне что-нибудь 😊")
+@dp.message(Command("start"))
+async def start_handler(message: Message):
+    if message.from_user.id != ALLOWED_USER_ID:
+        return
+    await message.answer(
+        "👋 Привет! Я — ИИ-ассистент Академика Fallout.\n\n"
+        "https://t.me/levperegrev\n\n"
+        "Задавай вопросы — отвечу через YandexGPT!"
+    )
 
 @dp.message()
-async def chat_handler(message: types.Message):
-    await message.answer("Думаю...")
-    ai_reply = get_ai_response(message.text)
-    await message.answer(ai_reply)
+async def ai_handler(message: Message):
+    if message.from_user.id != ALLOWED_USER_ID:
+        return
+    try:
+        await bot.send_chat_action(message.chat.id, "typing")
+        response = await get_yandex_response(message.text)
+        await message.answer(response)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
 
 async def main():
+    print("✅ Bot started on YandexGPT with your keys!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

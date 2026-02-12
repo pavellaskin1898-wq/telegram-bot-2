@@ -29,13 +29,27 @@ async def get_deepseek_response(prompt: str) -> str:
     }
     
     async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://api.deepseek.com/v1/chat/completions",
-            headers=headers,
-            json=data
-        ) as response:
-            result = await response.json()
-            return result["choices"][0]["message"]["content"]
+        try:
+            async with session.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers=headers,
+                json=data
+            ) as response:
+                result = await response.json()
+                
+                # Проверяем, есть ли ошибка в ответе
+                if response.status != 200:
+                    return f"❌ Ошибка API: {result.get('error', {}).get('message', 'Неизвестная ошибка')}"
+                
+                # Проверяем, есть ли choices в ответе
+                if 'choices' not in result or not result['choices']:
+                    return f"❌ Нет ответа от модели. Ответ: {result}"
+                
+                # Возвращаем текст ответа
+                return result['choices'][0]['message']['content']
+                
+        except Exception as e:
+            return f"❌ Ошибка при запросе: {str(e)}"
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):

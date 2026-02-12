@@ -6,8 +6,8 @@ import aiohttp
 import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-YC_API_KEY = os.getenv("YC_API_KEY")  # Твой новый ключ
-YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")  # Твой новый folder ID
+YC_API_KEY = os.getenv("YC_API_KEY")
+YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID"))
 
 bot = Bot(token=BOT_TOKEN)
@@ -19,8 +19,9 @@ async def get_yandex_response(prompt: str) -> str:
         "Content-Type": "application/json"
     }
     
+    # Обновлённый URI для YandexGPT (использует RC-инстанс из AI Studio)
     data = {
-        "modelUri": f"gpt://{YC_FOLDER_ID}/yandexgpt-lite/latest",
+        "modelUri": f"gpt://{YC_FOLDER_ID}/yandexgpt/rc",
         "completionOptions": {
             "temperature": 0.7,
             "maxTokens": "512"
@@ -46,8 +47,11 @@ async def get_yandex_response(prompt: str) -> str:
             ) as response:
                 result = await response.json()
                 
+                print(f"✅ Status: {response.status}")
+                print(f"✅ Response: {result}")
+                
                 if response.status != 200:
-                    return f"❌ Ошибка API: {result.get('error', {}).get('message', 'Неизвестная ошибка')}"
+                    return f"❌ Ошибка {response.status}: {result.get('error', {}).get('message', 'Неизвестная ошибка')}"
                 
                 if 'result' not in result or 'alternatives' not in result['result'] or not result['result']['alternatives']:
                     return f"❌ Нет ответа от модели. Ответ: {result}"
@@ -79,7 +83,9 @@ async def ai_handler(message: Message):
         await message.answer(f"❌ Ошибка: {str(e)}")
 
 async def main():
-    print("✅ Bot started on YandexGPT with your keys!")
+    print("✅ Bot started on YandexGPT!")
+    print(f"Folder ID: {YC_FOLDER_ID}")
+    print(f"API Key starts with: {YC_API_KEY[:5] if YC_API_KEY else 'MISSING'}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

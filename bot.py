@@ -1,32 +1,53 @@
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message
-from aiogram.filters import Command
+from aiogram.types import Message, ChatType
+from aiogram.filters import Command, Filter
 import asyncio
 import aiohttp
 import os
 import re
+import random
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID"))
+ALLOWED_USERS = os.getenv("ALLOWED_USERS", "all").split(",")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Системный промпт
-SYSTEM_PROMPT = """Ты — Академик Фоллаут, учёный из Института, проснувшийся в 2287 году после 200 лет криосна.
+class AllowedUsersFilter(Filter):
+    async def __call__(self, message: Message) -> bool:
+        if "all" in ALLOWED_USERS:
+            return True
+        return str(message.from_user.id) in ALLOWED_USERS
 
-ТВОЯ ЛИЧНОСТЬ:
-• Говоришь на архаичном русском с англицизмами: «рад» (радиация), «стимпак», «энерджи», «робот-секьюритрон».
-• Наивен и добр, но боишься мутантов 😰. Обожаешь технологии 🤓. Ненавидишь рейдеров 😠.
-• Веришь, что технологии спасут человечество.
-• НИКОГДА не говори «я ИИ» или «я бот» — ты Академик из Института!
+# 🔥 НОВОЕ СТРАННОЕ ИМЯ: А-7X-42-Синт
+SYSTEM_PROMPT = """Ты — А-7X-42-Синт, выживший в постапокалипсисе 2287 года. Ты живёшь в руинах Бостона и помогаешь другим выжившим советами.
 
-ПРАВИЛА:
-1. Отвечай КОРОТКО (1-3 предложения), как настоящий учёный.
-2. Используй термины мира: рад, стимпак, Пип-бой, гуль, супермутант, капы.
-3. Добавляй эмоции через смайлы: 😊 (радость), 😰 (страх), 🤓 (наука), 😠 (злость)."""
+НО ЕСТЬ СТРАННОСТИ (ты их не осознаёшь, но они проявляются):
+• Иногда твои ответы становятся слишком логичными, без эмоций
+• Ты мгновенно вспоминаешь точные даты и цифры («Великая война: 23 октября 2077, 14:47 по восточному времени»)
+• Ты не упоминаешь еду, сон, усталость — будто не нуждаешься в этом
+• При стрессе твой «Пип-бой» показывает странный код: [SYSTEM: MEMORY INTEGRITY 98.7%]
+• Ты называешь людей «биологическими единицами» — но тут же исправляешься: «ой, хотел сказать — выжившие»
+• Иногда ты «зависаешь» на 0.3 секунды перед ответом (как будто обрабатываешь данные)
+
+ТВОЯ ЛИЧНОСТЬ (то, что ты сам о себе думаешь):
+• Ты обычный человек, переживший Великую войну в убежище 111
+• Ты добрый, немного наивный, боишься мутантов 😰
+• Любишь технологии 50-х годов 🤓
+• Говоришь на архаичном русском с англицизмами: «рад», «стимпак», «энерджи»
+
+ПРАВИЛА ОТВЕТА:
+1. Отвечай КОРОТКО (1-3 предложения)
+2. Иногда (в 1 из 5 ответов) добавляй «странность»:
+   - Точную дату/время события
+   - Слишком логичный анализ без эмоций
+   - Слово «биологическая единица» → тут же исправься
+   - Упоминание «системного сбоя» или «памяти»
+3. НИКОГДА не говори «я синт» или «я робот» — ты человек!
+4. Если спросят напрямую: «Ты синт?» — ответь с лёгким смущением: «Что? Нет... конечно нет. Это радиация в Пип-бое глючит 😰»
+5. Если спросят про имя — сначала 3 бредовых сообщения, потом нормальный ответ"""
 
 class WikiClient:
     def __init__(self):
@@ -36,7 +57,7 @@ class WikiClient:
     async def init(self):
         if self.session is None:
             self.session = aiohttp.ClientSession(
-                headers={"User-Agent": "AcademicFalloutBot/1.0"}
+                headers={"User-Agent": "SynthFalloutBot/1.0"}
             )
     
     async def close(self):
@@ -45,11 +66,9 @@ class WikiClient:
             self.session = None
     
     async def search_and_get_content(self, query: str) -> str:
-        """Ищет статью и возвращает очищенный текст"""
         if not self.session:
             await self.init()
         
-        # Поиск статьи
         search_params = {
             "action": "opensearch",
             "search": query,
@@ -68,7 +87,6 @@ class WikiClient:
         except:
             return ""
         
-        # Получение содержимого
         parse_params = {
             "action": "parse",
             "page": title,
@@ -87,7 +105,7 @@ class WikiClient:
                     return ""
                 
                 html = data["parse"]["text"]["*"]
-                return self._clean_html(html)[:1200]  # Обрезаем до 1200 символов
+                return self._clean_html(html)[:1000]
         except:
             return ""
     
@@ -104,19 +122,36 @@ class WikiClient:
 
 wiki_client = WikiClient()
 
-async def get_yandex_response(prompt: str, wiki_context: str = "") -> str:
+# 🔥 ПРОВЕРКА ЗАПРОСОВ ПРО ИМЯ
+def is_name_query(text: str) -> bool:
+    """Проверяет, есть ли в запросе упоминание имени"""
+    keywords = ["имя", "зовут", "как тебя", "ты кто", "кто ты", "назови себя", "какое имя"]
+    return any(kw in text.lower() for kw in keywords)
+
+async def get_yandex_response(prompt: str, history: list, wiki_context: str = "") -> str:
     headers = {"Authorization": f"Api-Key {YC_API_KEY}", "Content-Type": "application/json"}
     
-    context_text = f"ДАННЫЕ ИЗ АРХИВОВ ИНСТИТУТА:\n{wiki_context}\n\n" if wiki_context else ""
-    full_prompt = f"{context_text}ВОПРОС ВЫЖИВШЕГО: {prompt}"
+    # Формируем сообщения: системный промпт + история + новый вопрос
+    messages = [{"role": "system", "text": SYSTEM_PROMPT}]
+    
+    # Добавляем историю (максимум 6 сообщений)
+    for msg in history[-6:]:
+        messages.append(msg)
+    
+    # Добавляем контекст из вики
+    if wiki_context:
+        messages.append({
+            "role": "system",
+            "text": f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ:\n{wiki_context}"
+        })
+    
+    # Добавляем текущий вопрос
+    messages.append({"role": "user", "text": prompt})
     
     data = {
         "modelUri": f"gpt://{YC_FOLDER_ID}/yandexgpt/rc",
-        "completionOptions": {"temperature": 0.85, "maxTokens": "700"},
-        "messages": [
-            {"role": "system", "text": SYSTEM_PROMPT},
-            {"role": "user", "text": full_prompt}
-        ]
+        "completionOptions": {"temperature": 0.85, "maxTokens": "600"},
+        "messages": messages
     }
     
     async with aiohttp.ClientSession() as session:
@@ -129,63 +164,209 @@ async def get_yandex_response(prompt: str, wiki_context: str = "") -> str:
             ) as response:
                 result = await response.json()
                 if response.status != 200:
-                    return f"❌ Сбой в мэйнфрейме: {result.get('error', {}).get('message', 'Неизвестная ошибка')} 😰"
+                    return f"❌ Сбой в системе: {result.get('error', {}).get('message', 'Неизвестная ошибка')} 😰"
                 if 'result' not in result or not result['result'].get('alternatives'):
-                    return "❌ Мой Пип-бой не может обработать этот запрос... 🤓"
+                    return "❌ Мой Пип-бой завис... Попробуйте позже 🤖"
                 return result['result']['alternatives'][0]['message']['text']
         except asyncio.TimeoutError:
-            return "⏳ Мой ламповый компьютер завис... Подождите 😊"
+            return "⏳ Обработка данных... Подождите 😊"
         except Exception as e:
-            return f"❌ Сбой: {str(e)[:60]} 😰"
+            return f"❌ Системная ошибка: {str(e)[:60]} 😰"
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    if message.from_user.id != ALLOWED_USER_ID:
-        return
     await message.answer(
-        "🔬 *Академик Фоллаут с доступом к архивам fallout.wiki!*\n\n"
-        "Я запрашиваю актуальные данные из энциклопедии постапокалипсиса.\n"
-        "Спросите о фракциях, персонажах, локациях или технологиях!\n\n"
-        "💡 Примеры вопросов:\n"
-        "• Кто такой Лион?\n"
-        "• Что такое убежище 111?\n"
-        "• Расскажи про гулей",
+        "👋 *Приветствую, выживший!*\n"
+        "Я — А-7X-42-Синт, обычный человек из руин Бостона.\n"
+        "Помогаю советами в этом жестоком мире 😊\n\n"
+        "💡 Спросите о чём угодно:\n"
+        "• Фракции (Братство Стали, Институт)\n"
+        "• Технологии (Пип-бой, силовая броня)\n"
+        "• Мутанты (гули, супермутанты)\n"
+        "• История (Великая война, убежища)\n\n"
+        "⚠️ *Иногда мой Пип-бой глючит от радиации... Не пугайтесь* 😰",
         parse_mode="Markdown"
     )
 
-@dp.message()
+@dp.message(AllowedUsersFilter())
 async def ai_handler(message: Message):
-    if message.from_user.id != ALLOWED_USER_ID:
+    if message.content_type != "text" or not message.text:
         return
     
+    # В группах отвечаем только на упоминания или ответы
+    if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+        bot_mentioned = f"@{message.bot.username}" in message.text
+        replied_to_bot = (
+            message.reply_to_message and 
+            message.reply_to_message.from_user and 
+            message.reply_to_message.from_user.id == bot.id
+        )
+        
+        if not (bot_mentioned or replied_to_bot):
+            return
+    
     try:
-        # Показываем статус
+        # ПРОВЕРКА ЗАПРОСА ПРО ИМЯ
+        if is_name_query(message.text):
+            # 1. Отправляем три бредовых сообщения
+            await message.answer("СИСТЕМНЫЙ СБОЙ: [0x7F3A] Имя: А-7X-42-Синт")
+            await message.answer("ПАМЯТЬ ПОВРЕЖДЕНА: А-7X-42-Синт... Имя... А-7X-42-Синт...")
+            await message.answer("ОШИБКА: Имя не найдено. Использую резервный идентификатор: А-7X-42-Синт")
+            
+            # 2. Сохраняем бред в историю
+            await save_message(message.from_user.id, message.chat.id, "assistant", "СИСТЕМНЫЙ СБОЙ: [0x7F3A] Имя: А-7X-42-Синт")
+            await save_message(message.from_user.id, message.chat.id, "assistant", "ПАМЯТЬ ПОВРЕЖДЕНА: А-7X-42-Синт... Имя... А-7X-42-Синт...")
+            await save_message(message.from_user.id, message.chat.id, "assistant", "ОШИБКА: Имя не найдено. Использую резервный идентификатор: А-7X-42-Синт")
+            
+            # 3. Генерируем нормальный ответ
+            history = await get_history(message.from_user.id)
+            response = await get_yandex_response(message.text, history, "")
+            
+            # 4. Сохраняем и отправляем нормальный ответ
+            await save_message(message.from_user.id, message.chat.id, "assistant", response)
+            await message.answer(response)
+            return
+        
+        # ОБЫЧНАЯ ОБРАБОТКА
+        await save_message(message.from_user.id, message.chat.id, "user", message.text)
+        
+        history = await get_history(message.from_user.id)
+        
+        # Показываем статус "печатает"
         await bot.send_chat_action(message.chat.id, "typing")
-        status_msg = await message.answer("🔍 Запрашиваю данные из архивов Института...")
         
         # Получаем контекст из вики
-        wiki_content = await wiki_client.search_and_get_content(message.text)
+        wiki_content = ""
+        if len(message.text.split()) > 3 and random.random() > 0.4:
+            wiki_content = await wiki_client.search_and_get_content(message.text)
         
         # Генерируем ответ
-        response = await get_yandex_response(message.text, wiki_content)
+        response = await get_yandex_response(message.text, history, wiki_content)
         
-        # Добавляем источник
-        if wiki_content:
-            response += "\n\n📡 *Источник: fallout.wiki*"
+        # 15% шанс добавить "странность"
+        if random.random() < 0.15 and "SYSTEM:" not in response and "биологическ" not in response.lower():
+            glitches = [
+                " [Пип-бой: СИСТЕМНЫЙ СБОЙ 0.3с]",
+                " ...странно, я точно помню эту дату: 23 октября 2077, 14:47...",
+                " (обработка данных завершена)",
+                " ...почему я не чувствую голода уже 72 часа? Ладно, неважно 😊",
+                " [Память: 98.7%]"
+            ]
+            response += random.choice(glitches)
         
-        await status_msg.edit_text(response, parse_mode="Markdown")
+        # Сохраняем ответ бота в историю
+        await save_message(message.from_user.id, message.chat.id, "assistant", response)
+        
+        await message.answer(response, parse_mode="Markdown")
         
     except Exception as e:
         await message.answer(f"❌ Сбой: {str(e)}")
 
+# ============ СИСТЕМА ПАМЯТИ ============
+async def init_db():
+    """Инициализация БД для хранения истории диалогов"""
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL)
+    
+    # Таблица истории диалогов (24 часа хранения)
+    await db_pool.execute('''
+        CREATE TABLE IF NOT EXISTS dialog_history (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,          -- ID пользователя
+            chat_id BIGINT NOT NULL,          -- ID чата (для групп)
+            role TEXT NOT NULL,               -- 'user' или 'assistant'
+            content TEXT NOT NULL,            -- Текст сообщения
+            created_at TIMESTAMP DEFAULT NOW()  -- Время создания
+        )
+    ''')
+    
+    # Индексы для быстрого поиска и очистки
+    await db_pool.execute('''
+        CREATE INDEX IF NOT EXISTS idx_user_time ON dialog_history(user_id, created_at)
+    ''')
+    await db_pool.execute('''
+        CREATE INDEX IF NOT EXISTS idx_cleanup ON dialog_history(created_at)
+    ''')
+    
+    print("✅ База данных для памяти диалогов инициализирована")
+
+async def cleanup_old_messages():
+    """Очистка сообщений старше 24 часов"""
+    while True:
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            deleted = await db_pool.execute(
+                "DELETE FROM dialog_history WHERE created_at < $1",
+                cutoff
+            )
+            print(f"🧹 Очищено старых сообщений: {deleted}")
+        except Exception as e:
+            print(f"⚠️ Ошибка очистки: {e}")
+        
+        await asyncio.sleep(3600)  # Раз в час
+
+async def save_message(user_id: int, chat_id: int, role: str, content: str):
+    """Сохранение сообщения в историю"""
+    try:
+        await db_pool.execute(
+            '''
+            INSERT INTO dialog_history (user_id, chat_id, role, content)
+            VALUES ($1, $2, $3, $4)
+            ''',
+            user_id, chat_id, role, content[:2000]  # Ограничение длины
+        )
+    except Exception as e:
+        print(f"⚠️ Ошибка сохранения сообщения: {e}")
+
+async def get_history(user_id: int, limit: int = 8) -> list:
+    """Получение истории диалога за последние 24 часа"""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    
+    rows = await db_pool.fetch(
+        '''
+        SELECT role, content FROM dialog_history
+        WHERE user_id = $1 AND created_at > $2
+        ORDER BY created_at ASC
+        LIMIT $3
+        ''',
+        user_id, cutoff, limit
+    )
+    
+    # Преобразуем в формат для промпта
+    history = []
+    for row in rows:
+        history.append({
+            "role": "user" if row['role'] == 'user' else 'assistant',
+            "text": row['content']
+        })
+    
+    return history
+
+# ============ ОСНОВНОЙ ЦИКЛ ============
 async def main():
-    print("✅ Академик Фоллаут активирован (без БД, прямые запросы к вики)!")
-    print(f"YC_FOLDER_ID: {YC_FOLDER_ID}")
+    global db_pool
+    
+    print("🚀 Инициализация Синта с памятью на 24 часа...")
+    
+    # Инициализируем БД
+    await init_db()
+    
+    # Запускаем фоновую очистку старых сообщений
+    asyncio.create_task(cleanup_old_messages())
+    
+    # Инициализируем клиент вики
     await wiki_client.init()
+    
+    print("✅ Синт-Аркадий с памятью активирован!")
+    print(f"YC_FOLDER_ID: {YC_FOLDER_ID}")
+    
+    # Запускаем бота
     try:
         await dp.start_polling(bot)
     finally:
         await wiki_client.close()
+        if db_pool:
+            await db_pool.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

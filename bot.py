@@ -6,7 +6,7 @@ import aiohttp
 import os
 import re
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import asyncpg
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -156,7 +156,7 @@ async def cleanup_old_messages():
     """Очистка сообщений старше 24 часов"""
     while True:
         try:
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            cutoff = datetime.utcnow() - timedelta(hours=24)
             deleted = await db_pool.execute(
                 "DELETE FROM dialog_history WHERE created_at < $1",
                 cutoff
@@ -182,7 +182,7 @@ async def save_message(user_id: int, chat_id: int, role: str, content: str):
 
 async def get_history(user_id: int, limit: int = 8) -> list:
     """Получение истории диалога за последние 24 часа"""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff = datetime.utcnow() - timedelta(hours=24)
     
     rows = await db_pool.fetch(
         '''
@@ -206,7 +206,7 @@ async def get_history(user_id: int, limit: int = 8) -> list:
 # ============ ПРОВЕРКА ЗАПРОСОВ ПРО ИМЯ ============
 def is_name_query(text: str) -> bool:
     """Проверяет, есть ли в запросе упоминание имени"""
-    keywords = ["имя", "зовут", "как тебя", "ты кто", "кто ты", "назови себя", "какое имя", "твое имя"]
+    keywords = ["имя", "зовут", "как тебя", "ты кто", "кто ты", "назови себя", "какое имя", "твое имя", "твоё имя"]
     return any(kw in text.lower() for kw in keywords)
 
 # ============ ЗАПРОС К YANDEXGPT ============
@@ -301,7 +301,7 @@ async def ai_handler(message: Message):
         await save_message(message.from_user.id, message.chat.id, "user", message.text)
         
         # ПРОВЕРКА ЗАПРОСА ПРО ИМЯ
-        if is_name_query(message.text.lower()):
+        if is_name_query(message.text):
             # Отправляем три бредовых сообщения
             await message.answer("СИСТЕМНЫЙ СБОЙ: [0x7F3A] Имя: А-7X-42-Синт")
             await message.answer("ПАМЯТЬ ПОВРЕЖДЕНА: А-7X-42-Синт... Имя... А-7X-42-Синт...")

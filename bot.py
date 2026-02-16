@@ -14,8 +14,8 @@ import sys
 from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
-from googletrans import Translator  # ← Синхронный!
-from duckduckgo_search import AsyncDDGS  # ← Асинхронный!
+from googletrans import Translator
+from duckduckgo_search import AsyncDDGS
 import lxml.html
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -30,7 +30,7 @@ dp = Dispatcher()
 
 db_pool = None
 shutdown_event = asyncio.Event()
-translator = Translator()  # ← Глобальный объект
+translator = Translator()
 
 def graceful_shutdown(signum, frame):
     print("🛑 Получен сигнал завершения — останавливаем бота...")
@@ -68,7 +68,7 @@ SYSTEM_PROMPT = """Ты — А-7X-42-Синт, выживший в постап�
 4. Если спросят «Ты синт?» — ответь с паникой: «Что? Нет... радиация глючит 😰»
 5. Если спросят про имя — сначала 3 бредовых сообщения, потом нормальный ответ"""
 
-class WikiClient:
+class MultiSourceSearcher:  # ← Исправлено: было WikiClient
     def __init__(self):
         self.session = None
         self.last_call = 0
@@ -98,7 +98,7 @@ class WikiClient:
         return text.strip()
 
     async def search_fandom(self, query_ru: str) -> str:
-        """Поиск на fallout.fandom.com (исправлено!)"""
+        """Поиск на fallout.fandom.com"""
         await self.init()
         try:
             # Переводим запрос на английский (синхронно!)
@@ -152,7 +152,7 @@ class WikiClient:
             return ""
 
     async def search_tvtropes(self, query_ru: str) -> str:
-        """Поиск на wikitropes.ru (исправлено!)"""
+        """Поиск на wikitropes.ru"""
         await self.init()
         try:
             encoded_query = query_ru.replace(" ", "+")
@@ -165,7 +165,7 @@ class WikiClient:
                 text = await resp.text()
             
             tree = lxml.html.fromstring(text)
-            links = tree.xpath("//div[@class='searchresult']/a/@href")
+            links = tree.xpath("//div[@class='mw-search-result-heading']/a/@href")
             if not links:
                 return ""
             
@@ -192,13 +192,13 @@ class WikiClient:
             return ""
 
     async def search_web(self, query_ru: str) -> str:
-        """Поиск через DuckDuckGo (исправлено!)"""
+        """Поиск через DuckDuckGo"""
         try:
             # Переводим запрос (синхронно!)
             translated = self.translator.translate(query_ru, dest='en', src='auto')
             query_en = translated.text.strip()
             
-            # Используем .text() — это СИНХРОННЫЙ метод!
+            # Используем .text() — это АСИНХРОННЫЙ метод, возвращает list!
             results = await self.ddgs.text(query_en, max_results=1)
             if results:
                 snippet = results[0]["body"]
@@ -237,13 +237,14 @@ class WikiClient:
             return ""
         return "\n".join(results)[:1500]
 
-# Инициализируем searcher (теперь он правильно называется!)
+# Инициализируем searcher (теперь правильно!)
 searcher = MultiSourceSearcher()
 
 async def init_db():
     global db_pool
     
     # 🔧 ИСПРАВЛЕНИЕ: парсим DATABASE_URL вручную
+    from urllib.parse import urlparse
     url = urlparse(DATABASE_URL)
     
     for attempt in range(1, 6):
@@ -714,7 +715,6 @@ async def ai_handler(message: Message):
     except Exception as e:
         await message.answer(f"❌ Сбой: {str(e)}")
 
-# ============ HTTP-СЕРВЕР ДЛЯ RAILWAY ============
 async def health_check(request):
     return web.Response(text="OK", status=200)
 

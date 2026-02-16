@@ -11,22 +11,21 @@ from datetime import datetime, timedelta
 import asyncpg
 import signal
 import sys
+from urllib.parse import urlparse
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "all").split(",")
 DATABASE_URL = os.getenv("DATABASE_URL")
-PORT = int(os.getenv("PORT", "8080"))  # Порт для Railway здоровья
+PORT = int(os.getenv("PORT", "8080"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Глобальное подключение к БД
 db_pool = None
 shutdown_event = asyncio.Event()
 
-# Обработка сигналов завершения
 def graceful_shutdown(signum, frame):
     print("🛑 Получен сигнал завершения — останавливаем бота...")
     shutdown_event.set()
@@ -136,12 +135,8 @@ class WikiClient:
 
 wiki_client = WikiClient()
 
-# ============ СИСТЕМА ПАМЯТИ ============
 async def init_db():
     global db_pool
-    
-    # 🚨 ИСПРАВЛЕНИЕ: парсим DATABASE_URL вручную
-    from urllib.parse import urlparse
     url = urlparse(DATABASE_URL)
     
     db_pool = await asyncpg.create_pool(
@@ -149,9 +144,19 @@ async def init_db():
         password=url.password,
         host=url.hostname,
         port=url.port,
-        database=url.path[1:],  # Убираем слеш
-        ssl="require"  # Важно: Railway использует SSL
+        database=url.path[1:],
+        ssl="require"
     )
+    
+    await db_pool.execute('''
+        CREATE TABLE IF NOT EXISTS dialog_history (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            chat_id BIGINT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
     ''')
     
     await db_pool.execute('''
@@ -252,7 +257,6 @@ async def get_history(user_id: int, limit: int = 8) -> list:
     
     return history
 
-# ============ СИСТЕМА "ЖИЗНИ" БОТА ============
 async def get_user_status(user_id: int) -> dict:
     row = await db_pool.fetchrow(
         '''
@@ -528,7 +532,6 @@ async def ai_handler(message: Message):
     except Exception as e:
         await message.answer(f"❌ Сбой: {str(e)}")
 
-# ============ HTTP-СЕРВЕР ДЛЯ RAILWAY ============
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
@@ -546,7 +549,6 @@ async def start_http_server():
     print(f"✅ HTTP-сервер здоровья запущен на порту {PORT}")
     return runner
 
-# ============ ЗАПУСК ============
 async def main():
     global db_pool
     
@@ -554,15 +556,12 @@ async def main():
     print(f"YC_FOLDER_ID: {YC_FOLDER_ID}")
     print(f"PORT: {PORT}")
     
-    # Запускаем HTTP-сервер для здоровья Railway
     http_runner = await start_http_server()
     
-    # Инициализируем БД
     await init_db()
     asyncio.create_task(cleanup_old_messages())
     asyncio.create_task(scheduled_life_messages())
     
-    # Инициализируем клиент вики
     await wiki_client.init()
     
     print("✅ А-7X-42-Синт активирован со ВСЕМИ фичами:")
@@ -574,26 +573,19 @@ async def main():
     print("   • HTTP-здоровье: порт", PORT)
     
     try:
-        # Запускаем бота с обработкой завершения
         polling_task = asyncio.create_task(dp.start_polling(bot))
-        
-        # Ждём сигнала завершения
         await shutdown_event.wait()
-        
         print("🛑 Остановка бота...")
         polling_task.cancel()
         try:
             await polling_task
         except asyncio.CancelledError:
             pass
-        
     finally:
         await wiki_client.close()
         if db_pool:
             await db_pool.close()
             print("✅ Соединение с БД закрыто")
-        
-        # Останавливаем HTTP-сервер
         await http_runner.cleanup()
         print("✅ HTTP-сервер остановлен")
 

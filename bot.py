@@ -13,6 +13,7 @@ import signal
 import sys
 from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
+import time
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
@@ -67,6 +68,8 @@ class WikiClient:
     def __init__(self):
         self.base_url = "https://fallout.fandom.com/api.php"
         self.session = None
+        self.last_wiki_call = 0
+        self.wiki_cooldown = 5  # секунд между запросами
     
     async def init(self):
         if self.session is None:
@@ -83,6 +86,12 @@ class WikiClient:
         if not self.session:
             await self.init()
         
+        # Ограничение частоты
+        now = time.time()
+        if now - self.last_wiki_call < self.wiki_cooldown:
+            await asyncio.sleep(self.wiki_cooldown - (now - self.last_wiki_call))
+        self.last_wiki_call = time.time()
+        
         search_params = {
             "action": "opensearch",
             "search": query,
@@ -93,12 +102,15 @@ class WikiClient:
         try:
             async with self.session.get(self.base_url, params=search_params, timeout=10) as resp:
                 if resp.status != 200:
+                    print(f"⚠️ Вики: ошибка поиска '{query}' — статус {resp.status}")
                     return ""
                 data = await resp.json()
                 if len(data) < 2 or not data[1]:
+                    print(f"⚠️ Вики: нет результатов для '{query}'")
                     return ""
                 title = data[1][0]
-        except:
+        except Exception as e:
+            print(f"❌ Вики: ошибка поиска '{query}': {type(e).__name__}: {e}")
             return ""
         
         parse_params = {
@@ -113,14 +125,17 @@ class WikiClient:
         try:
             async with self.session.get(self.base_url, params=parse_params, timeout=15) as resp:
                 if resp.status != 200:
+                    print(f"⚠️ Вики: ошибка парсинга '{title}' — статус {resp.status}")
                     return ""
                 data = await resp.json()
                 if "parse" not in data or "text" not in data["parse"] or "*" not in data["parse"]["text"]:
+                    print(f"⚠️ Вики: пустой контент для '{title}'")
                     return ""
                 
                 html = data["parse"]["text"]["*"]
                 return self._clean_html(html)[:800]
-        except:
+        except Exception as e:
+            print(f"❌ Вики: ошибка парсинга '{title}': {type(e).__name__}: {e}")
             return ""
     
     def _clean_html(self, html: str) -> str:
@@ -135,23 +150,6 @@ class WikiClient:
         return text.strip()
 
 wiki_client = WikiClient()
-
-async def safe_execute(pool, query, *args):
-    """Безопасное выполнение запроса с повторной попыткой при разрыве соединения"""
-    for attempt in range(3):
-        try:
-            return await pool.execute(query, *args)
-        except (InterfaceError, ConnectionDoesNotExistError) as e:
-            print(f"⚠️ Соединение с БД разорвано — переподключаюсь... (попытка {attempt+1}/3)")
-            if attempt == 2:
-                raise
-            await asyncio.sleep(1)
-            # Пересоздаём пул (если нужно)
-            global db_pool
-            if db_pool:
-                await db_pool.close()
-            await init_db()  # Пересоздаём пул
-            continue
 
 async def init_db():
     global db_pool
@@ -362,23 +360,24 @@ async def generate_life_message(user_id: int, status: dict) -> str:
         f"Прошёл мимо старого робота-секьюритрона. Он всё ещё патрулирует... хотя все давно мертвы 🤖",
     ]
     
-    # Сообщения с вики
+    # Темы для вики-запросов
     wiki_subjects = [
         "гуль", "супермутант", "рейдер", "гуль-пастух", "псионик", "снайпер-рейдер", "дети атома",
         "гуль-священник", "супермутант-бригадир", "снайпер-рейдер", "гуль-охотник", "псионик-шаман"
     ]
     
-    wiki_messages = []
-    for subject in wiki_subjects:
-        try:
+    # Пытаемся получить 1 вики-сообщение (30% шанс)
+    wiki_message = None
+    if random.random() < 0.3:
+        for subject in random.sample(wiki_subjects, min(5, len(wiki_subjects))):
             content = await wiki_client.search_and_get_content(subject)
             if content:
-                # Берём первые 50 слов
-                words = content.split()[:50]
+                # Берём первые 60 слов
+                words = content.split()[:60]
                 summary = " ".join(words)
-                wiki_messages.append(f"Встретил {subject}! {summary}... 🧟‍♂️")
-        except:
-            pass
+                wiki_message = f"Встретил {subject}! {summary}... 🧟‍♂️"
+                break
+            await asyncio.sleep(0.3)  # чтобы не спамить
     
     # Обычные сообщения
     normal_messages = [
@@ -407,16 +406,15 @@ async def generate_life_message(user_id: int, status: dict) -> str:
     ]
     
     # Выбираем тип сообщения
-    if is_angry:
+    if wiki_message:
+        message = wiki_message
+    elif is_angry:
         message = random.choice(angry_messages)
     elif is_offended:
         message = random.choice(offended_messages)
     else:
-        # 50% шанс на вики-сообщение, 30% на самогенерацию, 20% на обычное
-        choice = random.random()
-        if choice < 0.5 and wiki_messages:
-            message = random.choice(wiki_messages)
-        elif choice < 0.8:
+        # 50% самогенерация, 50% обычные
+        if random.random() < 0.5:
             message = random.choice(self_generated_messages)
         else:
             message = random.choice(normal_messages)

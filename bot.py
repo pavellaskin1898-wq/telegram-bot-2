@@ -139,17 +139,19 @@ wiki_client = WikiClient()
 # ============ СИСТЕМА ПАМЯТИ ============
 async def init_db():
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL)
     
-    await db_pool.execute('''
-        CREATE TABLE IF NOT EXISTS dialog_history (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            chat_id BIGINT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
+    # 🚨 ИСПРАВЛЕНИЕ: парсим DATABASE_URL вручную
+    from urllib.parse import urlparse
+    url = urlparse(DATABASE_URL)
+    
+    db_pool = await asyncpg.create_pool(
+        user=url.username,
+        password=url.password,
+        host=url.hostname,
+        port=url.port,
+        database=url.path[1:],  # Убираем слеш
+        ssl="require"  # Важно: Railway использует SSL
+    )
     ''')
     
     await db_pool.execute('''

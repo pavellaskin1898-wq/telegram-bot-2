@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
 from googletrans import Translator  # ← Синхронный!
-from duckduckgo_search import AsyncDDGS  # ← Асинхронный!
+from duckduckgo_search import DDGS  # ← Синхронный!
 import lxml.html
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -30,7 +30,7 @@ dp = Dispatcher()
 
 db_pool = None
 shutdown_event = asyncio.Event()
-translator = Translator()
+translator = Translator()  # ← Создаём один объект
 
 def graceful_shutdown(signum, frame):
     print("🛑 Получен сигнал завершения — останавливаем бота...")
@@ -73,8 +73,8 @@ class MultiSourceSearcher:
         self.session = None
         self.last_call = 0
         self.cooldown = 5  # секунд между запросами
-        self.ddgs = AsyncDDGS()
-        self.translator = translator  # ← Привязываем глобальный translator
+        self.ddgs = DDGS()  # ← Синхронный!
+        self.translator = translator  # ← Привязываем глобальный
 
     async def init(self):
         if self.session is None:
@@ -193,15 +193,16 @@ class MultiSourceSearcher:
     async def search_web(self, query_ru: str) -> str:
         """Поиск через DuckDuckGo (исправлено!)"""
         try:
-            # Переводим (синхронно!)
+            # Переводим запрос (синхронно!)
             translated = self.translator.translate(query_ru, dest='en', src='auto')
-            query_en = translated.text
+            query_en = translated.text.strip()
             
-            # Используем .text() — это асинхронный метод!
-            results = await self.ddgs.text(query_en, max_results=1)
+            # Используем .text() — это СИНХРОННЫЙ метод!
+            results = self.ddgs.text(query_en, max_results=1)
             if results:
                 snippet = results[0]["body"]
-                # Переводим обратно (синхронно!)
+                
+                # Переводим ответ обратно (синхронно!)
                 try:
                     translated_back = self.translator.translate(snippet, dest='ru', src='en')
                     snippet = translated_back.text
@@ -224,7 +225,7 @@ class MultiSourceSearcher:
         results = []
         for name, coro in sources:
             try:
-                result = await coro  # ← await корутины
+                result = await coro  # ← await!
                 if result:
                     results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
             except Exception as e:
@@ -573,7 +574,7 @@ async def get_yandex_response(prompt: str, history: list, wiki_context: str = ""
         messages.append(msg)
     
     if wiki_context:
-        wiki_with_attr = f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ ИНСТИТУТА:\n{wiki_context}\n\n[ИСТОЧНИК: МНОЖЕСТВЕННЫЕ АРХИВЫ ИНСТИТУТА v2287.1 | ОБНОВЛЕНО: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')} | СТАТУС: АКТИВЕН]"
+        wiki_with_attr = f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ:\n{wiki_context}\n\n[ИСТОЧНИК: МНОЖЕСТВЕННЫЕ АРХИВЫ ИНСТИТУТА v2287.1 | ОБНОВЛЕНО: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')} | СТАТУС: АКТИВЕН]"
         messages.append({
             "role": "system",
             "text": wiki_with_attr
@@ -692,15 +693,7 @@ async def ai_handler(message: Message):
             if wiki_content:
                 print(f"🌐 Запрос к мультиархивам: '{message.text[:30]}...' → найдено {len(wiki_content)} символов")
         
-        # 🔥 ДОБАВЛЯЕМ контекст вики в историю (вот где связь!)
-        full_history = history[:]
-        if wiki_content:
-            full_history.append({
-                "role": "system",
-                "text": f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ ИНСТИТУТА:\n{wiki_content}"
-            })
-        
-        response = await get_yandex_response(message.text, full_history, "")  # ← wiki_context пустой, т.к. уже в history
+        response = await get_yandex_response(message.text, history, wiki_content)
         
         if random.random() < 0.15 and "SYSTEM:" not in response and "биологическ" not in response.lower():
             glitches = [
@@ -718,6 +711,7 @@ async def ai_handler(message: Message):
     except Exception as e:
         await message.answer(f"❌ Сбой: {str(e)}")
 
+# ============ HTTP-СЕРВЕР ДЛЯ RAILWAY ============
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
@@ -761,7 +755,6 @@ async def main():
     print("   • HTTP-здоровье: порт", PORT)
     
     try:
-        # Запускаем polling с обработкой сигналов
         polling_task = asyncio.create_task(dp.start_polling(bot))
         await shutdown_event.wait()
         print("🛑 Остановка бота...")

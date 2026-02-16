@@ -14,9 +14,9 @@ import sys
 from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
-from googletrans import Translator  # ← Синхронный!
-from duckduckgo_search import AsyncDDGS  # ← Асинхронный!
-import lxml.html  # ← Для парсинга tropes
+from googletrans import Translator  # ← Синхронный
+from duckduckgo_search import DDGS  # ← Синхронный (не AsyncDDGS!)
+import lxml.html
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
@@ -30,7 +30,7 @@ dp = Dispatcher()
 
 db_pool = None
 shutdown_event = asyncio.Event()
-translator = Translator()  # ← Создаём один объект для всего бота
+translator = Translator()  # ← Глобальный синхронный переводчик
 
 def graceful_shutdown(signum, frame):
     print("🛑 Получен сигнал завершения — останавливаем бота...")
@@ -73,8 +73,8 @@ class MultiSourceSearcher:
         self.session = None
         self.last_call = 0
         self.cooldown = 5  # секунд между запросами
-        self.ddgs = AsyncDDGS()
-        self.translator = translator  # ← Привязываем глобальный translator
+        self.ddgs = DDGS()  # ← Синхронный, не AsyncDDGS!
+        self.translator = translator  # ← Привязываем глобальный
 
     async def init(self):
         if self.session is None:
@@ -86,7 +86,7 @@ class MultiSourceSearcher:
         if self.session:
             await self.session.close()
 
-    async def _clean_html(self, html: str) -> str:
+    def _clean_html(self, html: str) -> str:  # ← Убрали async
         html = re.sub(r'<script.*?>.*?</script>', '', html, flags=re.DOTALL)
         html = re.sub(r'<style.*?>.*?</style>', '', html, flags=re.DOTALL)
         html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
@@ -138,7 +138,7 @@ class MultiSourceSearcher:
                     return ""
                 
                 html = data["parse"]["text"]["*"]
-                text = await self._clean_html(html)  # ← await!
+                text = self._clean_html(html)  # ← Вызываем СИНХРОННО (без await)
 
                 # Переводим ответ обратно на русский (синхронно!)
                 try:
@@ -155,8 +155,11 @@ class MultiSourceSearcher:
         """Поиск на wikitropes.ru (исправлено!)"""
         await self.init()
         try:
-            encoded_query = query_ru.replace(" ", "+")
-            url = f"https://wikitropes.ru/index.php?search={encoded_query}&title=Служебная%3AПоиск&fulltext=1"
+            # Переводим (синхронно!)
+            translated = self.translator.translate(query_ru, dest='en', src='auto')
+            query_en = translated.text.replace(" ", "+")
+            
+            url = f"https://wikitropes.ru/index.php?search={query_en}&title=Служебная%3AПоиск&fulltext=1"
             
             async with self.session.get(url, timeout=10) as resp:
                 if resp.status != 200:
@@ -178,25 +181,34 @@ class MultiSourceSearcher:
             paragraphs = tree.xpath("//div[@id='mw-content-text']//p/text()")
             content = "\n".join(paragraphs).strip()
             
-            # Переводим, если нужно (синхронно!)
-            if re.search(r'[а-яА-Я]', query_ru):
-                try:
-                    translated = self.translator.translate(content, dest='ru', src='en')
-                    content = translated.text
-                except:
-                    pass
+            # Переводим обратно (синхронно!)
+            try:
+                translated_back = self.translator.translate(content, dest='ru', src='en')
+                content = translated_back.text
+            except:
+                pass
             return content[:800]
         except Exception as e:
-            print(f"❌ TVTropes: {e}")
+            print(f"❌ TV Tropes: {e}")
             return ""
 
     async def search_web(self, query_ru: str) -> str:
         """Поиск через DuckDuckGo (исправлено!)"""
         try:
-            # Используем .text() — это асинхронный метод!
-            results = await self.ddgs.text(query_ru, max_results=1)
+            # Переводим (синхронно!)
+            translated = self.translator.translate(query_ru, dest='en', src='auto')
+            query_en = translated.text
+            
+            # Используем СИНХРОННЫЙ DDGS (не async!)
+            results = self.ddgs.text(query_en, max_results=1)
             if results:
                 snippet = results[0]["body"]
+                # Переводим обратно (синхронно!)
+                try:
+                    translated_back = self.translator.translate(snippet, dest='ru', src='en')
+                    snippet = translated_back.text
+                except:
+                    pass
                 return snippet[:800]
         except Exception as e:
             print(f"❌ Web search error: {e}")
@@ -214,7 +226,7 @@ class MultiSourceSearcher:
         results = []
         for name, coro in sources:
             try:
-                result = await coro  # ← await!
+                result = await coro  # ← await корутины
                 if result:
                     results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
             except Exception as e:
@@ -405,7 +417,7 @@ async def get_user_status(user_id: int) -> dict:
             "hours_since_seen": hours_since_seen,
             "is_offended": hours_since_reply > 4 and hours_since_seen < 1,
             "is_angry": hours_since_reply > 12 and hours_since_seen < 2,
-            "should_message": hours_since_bot_msg > 2
+            "should_message": hours_since_bot_msg > 3  # Пишет каждые 3 часа
         }
         
         return status
@@ -491,6 +503,7 @@ async def generate_life_message(user_id: int, status: dict) -> str:
             " [Пип-бой: СИСТЕМНЫЙ СБОЙ 0.3с]",
             " ...странно, я точно помню эту дату: 23 октября 2077, 14:47...",
             " (обработка данных завершена)",
+            " ...почему я не чувствую голода уже 72 часа? Ладно, неважно 😊",
             " [Память: 98.7%]"
         ]
         message += random.choice(glitches)
@@ -498,7 +511,7 @@ async def generate_life_message(user_id: int, status: dict) -> str:
     return message
 
 async def scheduled_life_messages():
-    print("⏰ Запущена фоновая задача 'жизни' бота (каждые 2 часа)")
+    print("⏰ Запущена фоновая задача 'жизни' бота (каждые 3 часа)")
     
     while not shutdown_event.is_set():
         try:
@@ -510,7 +523,7 @@ async def scheduled_life_messages():
                 ORDER BY last_message_from_bot ASC
                 LIMIT 10
                 ''',
-                now - timedelta(hours=2)
+                now - timedelta(hours=3)
             )
             
             for user in users:
@@ -533,13 +546,13 @@ async def scheduled_life_messages():
                     await asyncio.sleep(2)
                 except Exception as e:
                     error_str = str(e).lower()
-                    if "blocked" in error_str or "not found" in error_str:
+                    if "blocked" in error_str or "not found" in error_str or "user not found" in error_str:
                         print(f"🗑️ Пользователь {user_id} заблокировал бота — удаляем из БД")
                         await db_pool.execute("DELETE FROM users WHERE user_id = $1", user_id)
                         await db_pool.execute("DELETE FROM dialog_history WHERE user_id = $1", user_id)
             
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=120)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=10800)  # 3 часа
             except asyncio.TimeoutError:
                 continue
                 
@@ -700,6 +713,7 @@ async def ai_handler(message: Message):
     except Exception as e:
         await message.answer(f"❌ Сбой: {str(e)}")
 
+# ============ HTTP SERVER ДЛЯ HEALTH CHECK (для Railway) ============
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
@@ -724,6 +738,7 @@ async def main():
     print(f"YC_FOLDER_ID: {YC_FOLDER_ID}")
     print(f"PORT: {PORT}")
     
+    # Запускаем HTTP-сервер для Railway (иначе убьёт через 3 секунды)
     http_runner = await start_http_server()
     
     await init_db()
@@ -735,20 +750,14 @@ async def main():
     print("   • TV Tropes: wikitropes.ru (юмор и тропы)")
     print("   • Web: DuckDuckGo (общий поиск)")
     print("   • Память: 24 часа в PostgreSQL (устойчиво)")
-    print("   • Жизнь: каждые 2 часа — рандомные сообщения")
+    print("   • Жизнь: каждые 3 часа — рандомные сообщения")
     print("   • Глюки: 3 бредовых сообщения при вопросе про имя")
     print("   • Синт-природа: скрытые странности и системные сбои")
     print("   • HTTP-здоровье: порт", PORT)
     
     try:
-        polling_task = asyncio.create_task(dp.start_polling(bot))
-        await shutdown_event.wait()
-        print("🛑 Остановка бота...")
-        polling_task.cancel()
-        try:
-            await polling_task
-        except asyncio.CancelledError:
-            pass
+        # Запускаем polling (без конфликта — т.к. только 1 инстанс)
+        await dp.start_polling(bot)
     finally:
         await searcher.close()
         if db_pool:

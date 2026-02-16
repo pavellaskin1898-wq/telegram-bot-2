@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
 from googletrans import Translator
+from duckduckgo_search import AsyncDDGS
+import lxml.html
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
@@ -66,106 +68,24 @@ SYSTEM_PROMPT = """Ты — А-7X-42-Синт, выживший в постап�
 4. Если спросят «Ты синт?» — ответь с паникой: «Что? Нет... радиация глючит 😰»
 5. Если спросят про имя — сначала 3 бредовых сообщения, потом нормальный ответ"""
 
-class WikiClient:
+class MultiSourceSearcher:
     def __init__(self):
-        self.base_url = "https://fallout.fandom.com/api.php"
         self.session = None
-        self.last_wiki_call = 0
-        self.wiki_cooldown = 5  # секунд между запросами
-    
+        self.last_call = 0
+        self.cooldown = 5  # секунд между запросами
+        self.ddgs = AsyncDDGS()
+
     async def init(self):
         if self.session is None:
             self.session = aiohttp.ClientSession(
                 headers={"User-Agent": "SynthFalloutBot/1.0"}
             )
-    
+
     async def close(self):
         if self.session:
             await self.session.close()
-            self.session = None
-    
-    async def search_and_get_content(self, query: str) -> str:
-        if not self.session:
-            await self.init()
-        
-        # Автоматический перевод запроса на английский, если он не английский
-        try:
-            # Проверяем, есть ли кириллица — тогда переводим
-            if re.search(r'[а-яА-Я]', query):
-                print(f"🌍 Переводим запрос '{query}' на английский...")
-                translated = translator.translate(query, dest='en', src='auto')
-                query_en = translated.text.strip()
-                print(f"➡️ Переведено: '{query}' → '{query_en}'")
-            else:
-                query_en = query
-        except Exception as e:
-            print(f"⚠️ Ошибка перевода '{query}': {e} — используем как есть")
-            query_en = query
 
-        # Ограничение частоты
-        now = time.time()
-        if now - self.last_wiki_call < self.wiki_cooldown:
-            await asyncio.sleep(self.wiki_cooldown - (now - self.last_wiki_call))
-        self.last_wiki_call = time.time()
-
-        search_params = {
-            "action": "opensearch",
-            "search": query_en,
-            "limit": 1,
-            "format": "json"
-        }
-        
-        try:
-            async with self.session.get(self.base_url, params=search_params, timeout=10) as resp:
-                if resp.status != 200:
-                    print(f"⚠️ Вики: ошибка поиска '{query_en}' — статус {resp.status}")
-                    return ""
-                data = await resp.json()
-                if len(data) < 2 or not data[1]:
-                    print(f"⚠️ Вики: нет результатов для '{query_en}'")
-                    return ""
-                title = data[1][0]
-        except Exception as e:
-            print(f"❌ Вики: ошибка поиска '{query_en}': {type(e).__name__}: {e}")
-            return ""
-
-        parse_params = {
-            "action": "parse",
-            "page": title,
-            "format": "json",
-            "prop": "text",
-            "disableeditsection": 1,
-            "disabletoc": 1
-        }
-        
-        try:
-            async with self.session.get(self.base_url, params=parse_params, timeout=15) as resp:
-                if resp.status != 200:
-                    print(f"⚠️ Вики: ошибка парсинга '{title}' — статус {resp.status}")
-                    return ""
-                data = await resp.json()
-                if "parse" not in data or "text" not in data["parse"] or "*" not in data["parse"]["text"]:
-                    print(f"⚠️ Вики: пустой контент для '{title}'")
-                    return ""
-                
-                html = data["parse"]["text"]["*"]
-                content = self._clean_html(html)[:800]
-                
-                # Если исходный запрос был на русском — попробуем перевести ответ обратно
-                if re.search(r'[а-яА-Я]', query):
-                    try:
-                        print(f"🌐 Переводим ответ с английского на русский...")
-                        translated = translator.translate(content, dest='ru', src='en')
-                        content = translated.text
-                    except Exception as e:
-                        print(f"⚠️ Ошибка перевода ответа: {e} — оставляем на английском")
-                
-                return content
-        except Exception as e:
-            print(f"❌ Вики: ошибка парсинга '{title}': {type(e).__name__}: {e}")
-            return ""
-    
-    def _clean_html(self, html: str) -> str:
+    async def _clean_html(self, html: str) -> str:
         html = re.sub(r'<script.*?>.*?</script>', '', html, flags=re.DOTALL)
         html = re.sub(r'<style.*?>.*?</style>', '', html, flags=re.DOTALL)
         html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
@@ -176,13 +96,141 @@ class WikiClient:
         text = re.sub(r' +', ' ', text)
         return text.strip()
 
-wiki_client = WikiClient()
+    async def search_fandom(self, query_ru: str) -> str:
+        """Поиск на fallout.fandom.com"""
+        await self.init()
+        try:
+            # Переводим запрос на английский
+            translated = self.translator.translate(query_ru, dest='en', src='auto')
+            query_en = translated.text.strip()
+            print(f"🌍 Fandom: '{query_ru}' → '{query_en}'")
+
+            # Поиск через API
+            search_params = {
+                "action": "opensearch",
+                "search": query_en,
+                "limit": 1,
+                "format": "json"
+            }
+            async with self.session.get("https://fallout.fandom.com/api.php", params=search_params, timeout=10) as resp:
+                if resp.status != 200:
+                    return ""
+                data = await resp.json()
+                if len(data) < 2 or not data[1]:
+                    return ""
+                title = data[1][0]
+
+            # Парсинг статьи
+            parse_params = {
+                "action": "parse",
+                "page": title,
+                "format": "json",
+                "prop": "text",
+                "disableeditsection": 1,
+                "disabletoc": 1
+            }
+            async with self.session.get("https://fallout.fandom.com/api.php", params=parse_params, timeout=15) as resp:
+                if resp.status != 200:
+                    return ""
+                data = await resp.json()
+                if "parse" not in data or "text" not in data["parse"] or "*" not in data["parse"]["text"]:
+                    return ""
+                
+                html = data["parse"]["text"]["*"]
+                text = self._clean_html(html)
+                
+                # Переводим ответ обратно на русский
+                try:
+                    translated_back = self.translator.translate(text, dest='ru', src='en')
+                    text = translated_back.text
+                except:
+                    pass
+                return text[:800]
+        except Exception as e:
+            print(f"❌ Fandom: {e}")
+            return ""
+
+    async def search_tvtropes(self, query_ru: str) -> str:
+        """Поиск на wikitropes.ru"""
+        await self.init()
+        try:
+            encoded_query = query_ru.replace(" ", "+")
+            url = f"https://wikitropes.ru/index.php?search={encoded_query}&title=Служебная%3AПоиск&fulltext=1"
+            
+            async with self.session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    return ""
+                text = await resp.text()
+            
+            tree = lxml.html.fromstring(text)
+            links = tree.xpath("//div[@class='mw-search-result-heading']/a/@href")
+            if not links:
+                return ""
+            
+            article_url = "https://wikitropes.ru" + links[0]
+            async with self.session.get(article_url, timeout=10) as article_resp:
+                if article_resp.status != 200:
+                    return ""
+                article_text = await article_resp.text()
+            
+            tree = lxml.html.fromstring(article_text)
+            paragraphs = tree.xpath("//div[@id='mw-content-text']//p/text()")
+            content = "\n".join(paragraphs).strip()
+            
+            # Переводим, если нужно
+            if re.search(r'[а-яА-Я]', query_ru):
+                try:
+                    translated = self.translator.translate(content, dest='ru', src='en')
+                    content = translated.text
+                except:
+                    pass
+            return content[:800]
+        except Exception as e:
+            print(f"❌ TVTropes: {e}")
+            return ""
+
+    async def search_web(self, query_ru: str) -> str:
+        """Поиск через DuckDuckGo"""
+        try:
+            results = await self.ddgs.atext(query_ru, max_results=1)
+            if results:
+                snippet = results[0]["body"]
+                return snippet[:800]
+        except Exception as e:
+            print(f"❌ Web search error: {e}")
+            return ""
+        return ""
+
+    async def search_all(self, query: str) -> str:
+        """Объединённый поиск по всем источникам"""
+        sources = [
+            ("Fandom", self.search_fandom(query)),
+            ("TV Tropes", self.search_tvtropes(query)),
+            ("Web", self.search_web(query))
+        ]
+
+        results = []
+        for name, coro in sources:
+            try:
+                result = await coro
+                if result:
+                    results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
+            except Exception as e:
+                print(f"⚠️ Ошибка в {name}: {e}")
+            await asyncio.sleep(1)
+
+        if not results:
+            return ""
+        return "\n".join(results)[:1500]
+
+# Инициализируем searcher
+searcher = MultiSourceSearcher()
+searcher.translator = translator
 
 async def init_db():
     global db_pool
     url = urlparse(DATABASE_URL)
     
-    # Повторные попытки подключения (макс. 5)
     for attempt in range(1, 6):
         try:
             print(f"🔄 Попытка подключения к БД ({attempt}/5)...")
@@ -204,7 +252,6 @@ async def init_db():
                 raise
             await asyncio.sleep(2)
     
-    # Создаём таблицы
     await db_pool.execute('''
         CREATE TABLE IF NOT EXISTS dialog_history (
             id SERIAL PRIMARY KEY,
@@ -290,7 +337,7 @@ async def save_message(user_id: int, chat_id: int, role: str, content: str):
                 user_id, chat_id
             )
     except (asyncpg.exceptions.InterfaceError, asyncpg.exceptions.ConnectionDoesNotExistError) as e:
-        print(f"⚠️ Ошибка БД при сохранении: {e} — игнорируем (сообщение не критично)")
+        print(f"⚠️ Ошибка БД при сохранении: {e} — игнорируем")
     except Exception as e:
         print(f"⚠️ Серьёзная ошибка сохранения: {e}")
 
@@ -357,7 +404,7 @@ async def get_user_status(user_id: int) -> dict:
             "hours_since_seen": hours_since_seen,
             "is_offended": hours_since_reply > 4 and hours_since_seen < 1,
             "is_angry": hours_since_reply > 12 and hours_since_seen < 2,
-            "should_message": hours_since_bot_msg > 2  # Пишет каждые 2 часа
+            "should_message": hours_since_bot_msg > 2
         }
         
         return status
@@ -373,7 +420,6 @@ async def generate_life_message(user_id: int, status: dict) -> str:
     is_offended = status["is_offended"]
     is_angry = status["is_angry"]
     
-    # Сообщения, которые бот сам придумывает
     self_generated_messages = [
         f"Сегодня видел гуля в старом здании. Он что-то напевал... по-моему, песню 50-х годов 🎵",
         f"Мой Пип-бой зафиксировал странный сигнал с севера. Кто-то ещё жив? 📡",
@@ -387,26 +433,21 @@ async def generate_life_message(user_id: int, status: dict) -> str:
         f"Прошёл мимо старого робота-секьюритрона. Он всё ещё патрулирует... хотя все давно мертвы 🤖",
     ]
     
-    # Темы для вики-запросов
     wiki_subjects = [
-        "гуль", "супермутант", "рейдер", "гуль-пастух", "псионик", "снайпер-рейдер", "дети атома",
-        "гуль-священник", "супермутант-бригадир", "снайпер-рейдер", "гуль-охотник", "псионик-шаман"
+        "гуль", "супермутант", "рейдер", "гуль-пастух", "псионик", "снайпер-рейдер", "дети атома"
     ]
     
-    # Пытаемся получить 1 вики-сообщение (30% шанс)
     wiki_message = None
     if random.random() < 0.3:
         for subject in random.sample(wiki_subjects, min(5, len(wiki_subjects))):
-            content = await wiki_client.search_and_get_content(subject)
+            content = await searcher.search_all(subject)
             if content:
-                # Берём первые 60 слов
                 words = content.split()[:60]
                 summary = " ".join(words)
                 wiki_message = f"Встретил {subject}! {summary}... 🧟‍♂️"
                 break
-            await asyncio.sleep(0.3)  # чтобы не спамить
+            await asyncio.sleep(0.3)
     
-    # Обычные сообщения
     normal_messages = [
         f"Что-то тихо сегодня в руинах... Как твои дела, {username}? 😊",
         f"Мой Пип-бой показывает аномальный уровень радиации к северу отсюда. Ты не был там сегодня?",
@@ -432,7 +473,6 @@ async def generate_life_message(user_id: int, status: dict) -> str:
         f"Хватит. Я ухожу в Институт. Там синты хотя бы не игнорируют друг друга. 😤",
     ]
     
-    # Выбираем тип сообщения
     if wiki_message:
         message = wiki_message
     elif is_angry:
@@ -440,7 +480,6 @@ async def generate_life_message(user_id: int, status: dict) -> str:
     elif is_offended:
         message = random.choice(offended_messages)
     else:
-        # 50% самогенерация, 50% обычные
         if random.random() < 0.5:
             message = random.choice(self_generated_messages)
         else:
@@ -470,7 +509,7 @@ async def scheduled_life_messages():
                 ORDER BY last_message_from_bot ASC
                 LIMIT 10
                 ''',
-                now - timedelta(hours=2)  # Каждые 2 часа
+                now - timedelta(hours=2)
             )
             
             for user in users:
@@ -493,13 +532,13 @@ async def scheduled_life_messages():
                     await asyncio.sleep(2)
                 except Exception as e:
                     error_str = str(e).lower()
-                    if "blocked" in error_str or "not found" in error_str or "user not found" in error_str:
+                    if "blocked" in error_str:
                         print(f"🗑️ Пользователь {user_id} заблокировал бота — удаляем из БД")
                         await db_pool.execute("DELETE FROM users WHERE user_id = $1", user_id)
                         await db_pool.execute("DELETE FROM dialog_history WHERE user_id = $1", user_id)
             
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=120)  # Проверяем каждые 2 минуты
+                await asyncio.wait_for(shutdown_event.wait(), timeout=120)
             except asyncio.TimeoutError:
                 continue
                 
@@ -522,9 +561,8 @@ async def get_yandex_response(prompt: str, history: list, wiki_context: str = ""
     for msg in history[-6:]:
         messages.append(msg)
     
-    # Добавляем атрибуцию к вики-контексту
     if wiki_context:
-        wiki_with_attr = f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ ИНСТИТУТА:\n{wiki_context}\n\n[ИСТОЧНИК: БАЗА ДАННЫХ ИНСТИТУТА v2287.1 | ОБНОВЛЕНО: 23.10.2077 14:47:32 | СТАТУС: АКТИВЕН]"
+        wiki_with_attr = f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ:\n{wiki_context}\n\n[ИСТОЧНИК: МНОЖЕСТВЕННЫЕ АРХИВЫ ИНСТИТУТА v2287.1 | ОБНОВЛЕНО: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')} | СТАТУС: АКТИВЕН]"
         messages.append({
             "role": "system",
             "text": wiki_with_attr
@@ -553,13 +591,12 @@ async def get_yandex_response(prompt: str, history: list, wiki_context: str = ""
                     return "❌ Мой Пип-бой завис... Попробуйте позже 🤖"
                 response_text = result['result']['alternatives'][0]['message']['text']
                 
-                # Добавляем атрибуцию в конце ответа, если был контекст из вики
                 if wiki_context:
                     response_text += (
                         "\n\n────────────────────────────\n"
                         "🔍 *АРХИВНЫЙ ОТЧЁТ*\n"
-                        "• ИСТОЧНИК: БАЗА ДАННЫХ ИНСТИТУТА v2287.1\n"
-                        "• ОБНОВЛЕНО: 23.10.2077 14:47:32\n"
+                        "• ИСТОЧНИК: МНОЖЕСТВЕННЫЕ АРХИВЫ ИНСТИТУТА v2287.1\n"
+                        f"• ОБНОВЛЕНО: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
                         "• СТАТУС: АКТИВЕН\n"
                         "• ПРОВЕРКА: ПОДТВЕРЖДЕНО (Пип-бой: OK)\n"
                         "────────────────────────────"
@@ -640,10 +677,9 @@ async def ai_handler(message: Message):
         
         wiki_content = ""
         if len(message.text.split()) > 3 and random.random() > 0.4:
-            wiki_content = await wiki_client.search_and_get_content(message.text)
+            wiki_content = await searcher.search_all(message.text)
             if wiki_content:
-                print(f"🌐 Запрос к fallout.wiki: '{message.text[:30]}...' → найдено {len(wiki_content)} символов")
-                print(f"📚 ИСТОЧНИК: База данных Института v2287.1 — обновлено 23.10.2077")
+                print(f"🌐 Запрос к мультиархивам: '{message.text[:30]}...' → найдено {len(wiki_content)} символов")
         
         response = await get_yandex_response(message.text, history, wiki_content)
         
@@ -693,13 +729,12 @@ async def main():
     asyncio.create_task(cleanup_old_messages())
     asyncio.create_task(scheduled_life_messages())
     
-    await wiki_client.init()
-    
     print("✅ А-7X-42-Синт активирован со ВСЕМИ фичами:")
-    print("   • Вики: запросы к fallout.wiki (с автоматическим переводом)")
+    print("   • Вики: fallout.fandom.com (с переводом)")
+    print("   • TV Tropes: wikitropes.ru (юмор и тропы)")
+    print("   • Web: DuckDuckGo (общий поиск)")
     print("   • Память: 24 часа в PostgreSQL (устойчиво)")
     print("   • Жизнь: каждые 2 часа — рандомные сообщения")
-    print("   • Вики-сообщения: встречи с мутантами, рейдерами")
     print("   • Глюки: 3 бредовых сообщения при вопросе про имя")
     print("   • Синт-природа: скрытые странности и системные сбои")
     print("   • HTTP-здоровье: порт", PORT)
@@ -714,7 +749,7 @@ async def main():
         except asyncio.CancelledError:
             pass
     finally:
-        await wiki_client.close()
+        await searcher.close()
         if db_pool:
             await db_pool.close()
             print("✅ Соединение с БД закрыто")

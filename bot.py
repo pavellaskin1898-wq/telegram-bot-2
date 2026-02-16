@@ -16,8 +16,10 @@ from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
 from googletrans import Translator
 from duckduckgo_search import DDGS
+import fitz  # PyMuPDF
 import lxml.html
 
+# === ENVIRONMENT VARIABLES ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
@@ -28,9 +30,11 @@ PORT = int(os.getenv("PORT", "8080"))
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# === GLOBAL VARIABLES ===
 db_pool = None
 shutdown_event = asyncio.Event()
-translator = Translator()
+translator = Translator()  # ← Синхронный переводчик
+ddgs = DDGS()  # ← Синхронный DDGS
 
 def graceful_shutdown(signum, frame):
     print("🛑 Получен сигнал завершения — останавливаем бота...")
@@ -68,12 +72,62 @@ SYSTEM_PROMPT = """Ты — А-7X-42-Синт, выживший в постап�
 4. Если спросят «Ты синт?» — ответь с паникой: «Что? Нет... радиация глючит 😰»
 5. Если спросят про имя — сначала 3 бредовых сообщения, потом нормальный ответ"""
 
+class BibleSearcher:
+    def __init__(self, path: str = "/app/Biblia_Fallout.pdf"):
+        self.path = path
+        self.content = ""
+        self.load_bible()
+
+    def load_bible(self):
+        """Синхронная загрузка Библии из PDF"""
+        try:
+            doc = fitz.open(self.path)
+            text = ""
+            for page in doc:
+                text += page.get_text() + "\n"
+            doc.close()
+            self.content = text
+            print(f"📚 Библия Фоллаута загружена ({len(text)} символов)")
+        except FileNotFoundError:
+            print(f"⚠️ Файл Библии не найден: {self.path}")
+            self.content = ""
+        except Exception as e:
+            print(f"❌ Ошибка загрузки Библии: {e}")
+            self.content = ""
+
+    def search(self, query: str) -> str:
+        """Поиск в Библии по фразе (синхронно)"""
+        if not self.content:
+            return ""
+
+        # Переводим запрос на английский (синхронно!)
+        try:
+            translated = translator.translate(query, dest='en', src='auto')
+            query_en = translated.text.lower()
+        except:
+            query_en = query.lower()
+
+        # Ищем в тексте
+        matches = []
+        lines = self.content.split('\n')
+        for i, line in enumerate(lines):
+            if query_en in line.lower():
+                start = max(0, i - 2)
+                end = min(len(lines), i + 3)
+                context = "\n".join(lines[start:end])
+                matches.append(context.strip())
+
+        if not matches:
+            return ""
+
+        result = "\n\n".join(matches[:2])  # первые 2 совпадения
+        return result[:1000]
+
 class MultiSourceSearcher:
     def __init__(self):
         self.session = None
-        self.last_call = 0
-        self.cooldown = 5  # секунд между запросами
-        self.ddgs = DDGS()  # ← Синхронный!
+        self.bible = BibleSearcher()  # ← Добавляем Библию!
+        self.ddgs = ddgs  # ← Привязываем глобальный
         self.translator = translator  # ← Привязываем глобальный
 
     async def init(self):
@@ -86,7 +140,7 @@ class MultiSourceSearcher:
         if self.session:
             await self.session.close()
 
-    async def _clean_html(self, html: str) -> str:
+    def _clean_html(self, html: str) -> str:
         html = re.sub(r'<script.*?>.*?</script>', '', html, flags=re.DOTALL)
         html = re.sub(r'<style.*?>.*?</style>', '', html, flags=re.DOTALL)
         html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
@@ -98,10 +152,10 @@ class MultiSourceSearcher:
         return text.strip()
 
     async def search_fandom(self, query_ru: str) -> str:
-        """Поиск на fallout.fandom.com (исправлено!)"""
+        """Поиск на fallout.fandom.com (синхронный перевод!)"""
         await self.init()
         try:
-            # Переводим запрос на английский (синхронно!)
+            # Переводим запрос (синхронно!)
             translated = self.translator.translate(query_ru, dest='en', src='auto')
             query_en = translated.text.strip()
             print(f"🌍 Fandom: '{query_ru}' → '{query_en}'")
@@ -138,9 +192,9 @@ class MultiSourceSearcher:
                     return ""
                 
                 html = data["parse"]["text"]["*"]
-                text = await self._clean_html(html)  # ← await!
+                text = self._clean_html(html)  # ← Синхронно!
 
-                # Переводим ответ обратно на русский (синхронно!)
+                # Переводим ответ (синхронно!)
                 try:
                     translated_back = self.translator.translate(text, dest='ru', src='en')
                     text = translated_back.text
@@ -152,12 +206,14 @@ class MultiSourceSearcher:
             return ""
 
     async def search_tvtropes(self, query_ru: str) -> str:
-        """Поиск на wikitropes.ru"""
+        """Поиск на wikitropes.ru (синхронный перевод!)"""
         await self.init()
         try:
-            encoded_query = query_ru.replace(" ", "+")
-            url = f"https://wikitropes.ru/index.php" + \
-                  f"?search={encoded_query}&title=Служебная%3AПоиск&fulltext=1"
+            # Переводим (синхронно!)
+            translated = self.translator.translate(query_ru, dest='en', src='auto')
+            query_en = translated.text.replace(" ", "+")
+            
+            url = f"https://wikitropes.ru/index.php?search={query_en}&title=Служебная%3AПоиск&fulltext=1"
             
             async with self.session.get(url, timeout=10) as resp:
                 if resp.status != 200:
@@ -165,7 +221,7 @@ class MultiSourceSearcher:
                 text = await resp.text()
             
             tree = lxml.html.fromstring(text)
-            links = tree.xpath("//div[@class='searchresult']/a/@href")
+            links = tree.xpath("//div[@class='mw-search-result-heading']/a/@href")
             if not links:
                 return ""
             
@@ -179,13 +235,12 @@ class MultiSourceSearcher:
             paragraphs = tree.xpath("//div[@id='mw-content-text']//p/text()")
             content = "\n".join(paragraphs).strip()
             
-            # Переводим, если нужно (синхронно!)
-            if re.search(r'[а-яА-Я]', query_ru):
-                try:
-                    translated = self.translator.translate(content, dest='ru', src='en')
-                    content = translated.text
-                except:
-                    pass
+            # Переводим (синхронно!)
+            try:
+                translated_back = self.translator.translate(content, dest='ru', src='en')
+                content = translated_back.text
+            except:
+                pass
             return content[:800]
         except Exception as e:
             print(f"❌ TVTropes: {e}")
@@ -194,16 +249,16 @@ class MultiSourceSearcher:
     async def search_web(self, query_ru: str) -> str:
         """Поиск через DuckDuckGo (синхронный!)"""
         try:
-            # Переводим запрос (синхронно!)
+            # Переводим (синхронно!)
             translated = self.translator.translate(query_ru, dest='en', src='auto')
-            query_en = translated.text.strip()
+            query_en = translated.text
             
-            # Используем .text() — это СИНХРОННЫЙ метод!
+            # Используем синхронный DDGS
             results = self.ddgs.text(query_en, max_results=1)
             if results:
                 snippet = results[0]["body"]
                 
-                # Переводим ответ обратно (синхронно!)
+                # Переводим обратно (синхронно!)
                 try:
                     translated_back = self.translator.translate(snippet, dest='ru', src='en')
                     snippet = translated_back.text
@@ -216,35 +271,29 @@ class MultiSourceSearcher:
         return ""
 
     async def search_all(self, query: str) -> str:
-        """Объединённый поиск по всем источникам"""
+        """Объединённый поиск по всем источникам (включая Библию!)"""
         sources = [
+            ("Fallout Bible", self.bible.search(query)),  # ← Синхронный!
             ("Fandom", self.search_fandom(query)),
             ("TV Tropes", self.search_tvtropes(query)),
             ("Web", self.search_web(query))
         ]
 
         results = []
-        for name, coro in sources:
-            try:
-                result = await coro  # ← await!
-                if result:
-                    results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
-            except Exception as e:
-                print(f"⚠️ Ошибка в {name}: {e}")
-            await asyncio.sleep(1)
+        for name, result in sources:  # ← НЕ корутины!
+            if result:
+                results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
+            await asyncio.sleep(0.3)
 
         if not results:
             return ""
         return "\n".join(results)[:1500]
 
-# Инициализируем searcher (теперь правильно!)
+# === INITIALIZATION ===
 searcher = MultiSourceSearcher()
 
 async def init_db():
     global db_pool
-    
-    # 🔧 ИСПРАВЛЕНИЕ: парсим DATABASE_URL вручную
-    from urllib.parse import urlparse
     url = urlparse(DATABASE_URL)
     
     for attempt in range(1, 6):
@@ -255,8 +304,8 @@ async def init_db():
                 password=url.password,
                 host=url.hostname,
                 port=url.port,
-                database=url.path[1:],  # Убираем /
-                ssl="require",  # ← Важно для Railway!
+                database=url.path[1:],
+                ssl="require",
                 min_size=1,
                 max_size=5,
                 command_timeout=30
@@ -352,7 +401,7 @@ async def save_message(user_id: int, chat_id: int, role: str, content: str):
                 ''',
                 user_id, chat_id
             )
-    except (asyncpg.exceptions.InterfaceError, asyncpg.exceptions.ConnectionDoesNotExistError) as e:
+    except (InterfaceError, ConnectionDoesNotExistError) as e:
         print(f"⚠️ Ошибка БД при сохранении: {e} — игнорируем")
     except Exception as e:
         print(f"⚠️ Серьёзная ошибка сохранения: {e}")
@@ -379,7 +428,7 @@ async def get_history(user_id: int, limit: int = 8) -> list:
             })
         
         return history
-    except (asyncpg.exceptions.InterfaceError, asyncpg.exceptions.ConnectionDoesNotExistError) as e:
+    except (InterfaceError, ConnectionDoesNotExistError) as e:
         print(f"⚠️ Ошибка БД при чтении истории: {e} — возвращаю пустую историю")
         return []
     except Exception as e:
@@ -424,7 +473,7 @@ async def get_user_status(user_id: int) -> dict:
         }
         
         return status
-    except (asyncpg.exceptions.InterfaceError, asyncpg.exceptions.ConnectionDoesNotExistError) as e:
+    except (InterfaceError, ConnectionDoesNotExistError) as e:
         print(f"⚠️ Ошибка БД при чтении статуса: {e} — возвращаю None")
         return None
     except Exception as e:
@@ -745,9 +794,8 @@ async def main():
     asyncio.create_task(cleanup_old_messages())
     asyncio.create_task(scheduled_life_messages())
     
-    await searcher.init()  # ← Используем searcher вместо wiki_client!
-    
     print("✅ А-7X-42-Синт активирован со ВСЕМИ фичами:")
+    print("   • Библия: Biblia_Fallout.pdf (канон от Криса Авельоне)")
     print("   • Вики: fallout.fandom.com (с переводом)")
     print("   • TV Tropes: wikitropes.ru (юмор и тропы)")
     print("   • Web: DuckDuckGo (общий поиск)")

@@ -14,6 +14,7 @@ import sys
 from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
+from googletrans import Translator
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
@@ -27,6 +28,7 @@ dp = Dispatcher()
 
 db_pool = None
 shutdown_event = asyncio.Event()
+translator = Translator()
 
 def graceful_shutdown(signum, frame):
     print("🛑 Получен сигнал завершения — останавливаем бота...")
@@ -86,15 +88,29 @@ class WikiClient:
         if not self.session:
             await self.init()
         
+        # Автоматический перевод запроса на английский, если он не английский
+        try:
+            # Проверяем, есть ли кириллица — тогда переводим
+            if re.search(r'[а-яА-Я]', query):
+                print(f"🌍 Переводим запрос '{query}' на английский...")
+                translated = translator.translate(query, dest='en', src='auto')
+                query_en = translated.text.strip()
+                print(f"➡️ Переведено: '{query}' → '{query_en}'")
+            else:
+                query_en = query
+        except Exception as e:
+            print(f"⚠️ Ошибка перевода '{query}': {e} — используем как есть")
+            query_en = query
+
         # Ограничение частоты
         now = time.time()
         if now - self.last_wiki_call < self.wiki_cooldown:
             await asyncio.sleep(self.wiki_cooldown - (now - self.last_wiki_call))
         self.last_wiki_call = time.time()
-        
+
         search_params = {
             "action": "opensearch",
-            "search": query,
+            "search": query_en,
             "limit": 1,
             "format": "json"
         }
@@ -102,17 +118,17 @@ class WikiClient:
         try:
             async with self.session.get(self.base_url, params=search_params, timeout=10) as resp:
                 if resp.status != 200:
-                    print(f"⚠️ Вики: ошибка поиска '{query}' — статус {resp.status}")
+                    print(f"⚠️ Вики: ошибка поиска '{query_en}' — статус {resp.status}")
                     return ""
                 data = await resp.json()
                 if len(data) < 2 or not data[1]:
-                    print(f"⚠️ Вики: нет результатов для '{query}'")
+                    print(f"⚠️ Вики: нет результатов для '{query_en}'")
                     return ""
                 title = data[1][0]
         except Exception as e:
-            print(f"❌ Вики: ошибка поиска '{query}': {type(e).__name__}: {e}")
+            print(f"❌ Вики: ошибка поиска '{query_en}': {type(e).__name__}: {e}")
             return ""
-        
+
         parse_params = {
             "action": "parse",
             "page": title,
@@ -133,7 +149,18 @@ class WikiClient:
                     return ""
                 
                 html = data["parse"]["text"]["*"]
-                return self._clean_html(html)[:800]
+                content = self._clean_html(html)[:800]
+                
+                # Если исходный запрос был на русском — попробуем перевести ответ обратно
+                if re.search(r'[а-яА-Я]', query):
+                    try:
+                        print(f"🌐 Переводим ответ с английского на русский...")
+                        translated = translator.translate(content, dest='ru', src='en')
+                        content = translated.text
+                    except Exception as e:
+                        print(f"⚠️ Ошибка перевода ответа: {e} — оставляем на английском")
+                
+                return content
         except Exception as e:
             print(f"❌ Вики: ошибка парсинга '{title}': {type(e).__name__}: {e}")
             return ""
@@ -669,7 +696,7 @@ async def main():
     await wiki_client.init()
     
     print("✅ А-7X-42-Синт активирован со ВСЕМИ фичами:")
-    print("   • Вики: запросы к fallout.wiki")
+    print("   • Вики: запросы к fallout.wiki (с автоматическим переводом)")
     print("   • Память: 24 часа в PostgreSQL (устойчиво)")
     print("   • Жизнь: каждые 2 часа — рандомные сообщения")
     print("   • Вики-сообщения: встречи с мутантами, рейдерами")

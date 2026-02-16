@@ -14,9 +14,9 @@ import sys
 from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
-from googletrans import Translator
-from duckduckgo_search import AsyncDDGS
-import lxml.html
+from googletrans import Translator  # ← Синхронный!
+from duckduckgo_search import AsyncDDGS  # ← Асинхронный!
+import lxml.html  # ← Для парсинга tropes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
@@ -30,7 +30,7 @@ dp = Dispatcher()
 
 db_pool = None
 shutdown_event = asyncio.Event()
-translator = Translator()
+translator = Translator()  # ← Создаём один объект для всего бота
 
 def graceful_shutdown(signum, frame):
     print("🛑 Получен сигнал завершения — останавливаем бота...")
@@ -74,7 +74,7 @@ class MultiSourceSearcher:
         self.last_call = 0
         self.cooldown = 5  # секунд между запросами
         self.ddgs = AsyncDDGS()
-        self.translator = translator
+        self.translator = translator  # ← Привязываем глобальный translator
 
     async def init(self):
         if self.session is None:
@@ -98,11 +98,11 @@ class MultiSourceSearcher:
         return text.strip()
 
     async def search_fandom(self, query_ru: str) -> str:
-        """Поиск на fallout.fandom.com"""
+        """Поиск на fallout.fandom.com (исправлено!)"""
         await self.init()
         try:
-            # Переводим запрос на английский
-            translated = await self.translator.translate(query_ru, dest='en', src='auto')
+            # Переводим запрос на английский (синхронно!)
+            translated = self.translator.translate(query_ru, dest='en', src='auto')
             query_en = translated.text.strip()
             print(f"🌍 Fandom: '{query_ru}' → '{query_en}'")
 
@@ -138,11 +138,11 @@ class MultiSourceSearcher:
                     return ""
                 
                 html = data["parse"]["text"]["*"]
-                text = self._clean_html(html)
+                text = await self._clean_html(html)  # ← await!
 
-                # Переводим ответ обратно на русский
+                # Переводим ответ обратно на русский (синхронно!)
                 try:
-                    translated_back = await self.translator.translate(text, dest='ru', src='en')
+                    translated_back = self.translator.translate(text, dest='ru', src='en')
                     text = translated_back.text
                 except:
                     pass
@@ -152,7 +152,7 @@ class MultiSourceSearcher:
             return ""
 
     async def search_tvtropes(self, query_ru: str) -> str:
-        """Поиск на wikitropes.ru"""
+        """Поиск на wikitropes.ru (исправлено!)"""
         await self.init()
         try:
             encoded_query = query_ru.replace(" ", "+")
@@ -164,7 +164,7 @@ class MultiSourceSearcher:
                 text = await resp.text()
             
             tree = lxml.html.fromstring(text)
-            links = tree.xpath("//div[@class='mw-search-result-heading']/a/@href")
+            links = tree.xpath("//div[@class='searchresult']/a/@href")
             if not links:
                 return ""
             
@@ -178,10 +178,10 @@ class MultiSourceSearcher:
             paragraphs = tree.xpath("//div[@id='mw-content-text']//p/text()")
             content = "\n".join(paragraphs).strip()
             
-            # Переводим, если нужно
+            # Переводим, если нужно (синхронно!)
             if re.search(r'[а-яА-Я]', query_ru):
                 try:
-                    translated = await self.translator.translate(content, dest='ru', src='en')
+                    translated = self.translator.translate(content, dest='ru', src='en')
                     content = translated.text
                 except:
                     pass
@@ -191,8 +191,9 @@ class MultiSourceSearcher:
             return ""
 
     async def search_web(self, query_ru: str) -> str:
-        """Поиск через DuckDuckGo (corrected)"""
+        """Поиск через DuckDuckGo (исправлено!)"""
         try:
+            # Используем .text() — это асинхронный метод!
             results = await self.ddgs.text(query_ru, max_results=1)
             if results:
                 snippet = results[0]["body"]
@@ -213,7 +214,7 @@ class MultiSourceSearcher:
         results = []
         for name, coro in sources:
             try:
-                result = await coro
+                result = await coro  # ← await!
                 if result:
                     results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
             except Exception as e:
@@ -532,7 +533,7 @@ async def scheduled_life_messages():
                     await asyncio.sleep(2)
                 except Exception as e:
                     error_str = str(e).lower()
-                    if "blocked" in error_str:
+                    if "blocked" in error_str or "not found" in error_str:
                         print(f"🗑️ Пользователь {user_id} заблокировал бота — удаляем из БД")
                         await db_pool.execute("DELETE FROM users WHERE user_id = $1", user_id)
                         await db_pool.execute("DELETE FROM dialog_history WHERE user_id = $1", user_id)
@@ -661,7 +662,7 @@ async def ai_handler(message: Message):
             await message.answer("ПАМЯТЬ ПОВРЕЖДЕНА: А-7X-42-Синт... Имя... А-7X-42-Синт...")
             await message.answer("ОШИБКА: Имя не найдено. Использую резервный идентификатор: А-7X-42-Синт")
             
-            await save_message(message.from_user.id, message.chat.id, "assistant", "СИТЕМНЫЙ СБОЙ: [0x7F3A] Имя: А-7X-42-Синт")
+            await save_message(message.from_user.id, message.chat.id, "assistant", "СИСТЕМНЫЙ СБОЙ: [0x7F3A] Имя: А-7X-42-Синт")
             await save_message(message.from_user.id, message.chat.id, "assistant", "ПАМЯТЬ ПОВРЕЖДЕНА: А-7X-42-Синт... Имя... А-7X-42-Синт...")
             await save_message(message.from_user.id, message.chat.id, "assistant", "ОШИБКА: Имя не найдено. Использую резервный идентификатор: А-7X-42-Синт")
             

@@ -74,6 +74,7 @@ class MultiSourceSearcher:
         self.last_call = 0
         self.cooldown = 5  # секунд между запросами
         self.ddgs = AsyncDDGS()
+        self.translator = translator
 
     async def init(self):
         if self.session is None:
@@ -101,7 +102,7 @@ class MultiSourceSearcher:
         await self.init()
         try:
             # Переводим запрос на английский
-            translated = self.translator.translate(query_ru, dest='en', src='auto')
+            translated = await self.translator.translate(query_ru, dest='en', src='auto')
             query_en = translated.text.strip()
             print(f"🌍 Fandom: '{query_ru}' → '{query_en}'")
 
@@ -138,10 +139,10 @@ class MultiSourceSearcher:
                 
                 html = data["parse"]["text"]["*"]
                 text = self._clean_html(html)
-                
+
                 # Переводим ответ обратно на русский
                 try:
-                    translated_back = self.translator.translate(text, dest='ru', src='en')
+                    translated_back = await self.translator.translate(text, dest='ru', src='en')
                     text = translated_back.text
                 except:
                     pass
@@ -180,7 +181,7 @@ class MultiSourceSearcher:
             # Переводим, если нужно
             if re.search(r'[а-яА-Я]', query_ru):
                 try:
-                    translated = self.translator.translate(content, dest='ru', src='en')
+                    translated = await self.translator.translate(content, dest='ru', src='en')
                     content = translated.text
                 except:
                     pass
@@ -190,9 +191,9 @@ class MultiSourceSearcher:
             return ""
 
     async def search_web(self, query_ru: str) -> str:
-        """Поиск через DuckDuckGo"""
+        """Поиск через DuckDuckGo (corrected)"""
         try:
-            results = await self.ddgs.atext(query_ru, max_results=1)
+            results = await self.ddgs.text(query_ru, max_results=1)
             if results:
                 snippet = results[0]["body"]
                 return snippet[:800]
@@ -225,7 +226,6 @@ class MultiSourceSearcher:
 
 # Инициализируем searcher
 searcher = MultiSourceSearcher()
-searcher.translator = translator
 
 async def init_db():
     global db_pool
@@ -661,7 +661,7 @@ async def ai_handler(message: Message):
             await message.answer("ПАМЯТЬ ПОВРЕЖДЕНА: А-7X-42-Синт... Имя... А-7X-42-Синт...")
             await message.answer("ОШИБКА: Имя не найдено. Использую резервный идентификатор: А-7X-42-Синт")
             
-            await save_message(message.from_user.id, message.chat.id, "assistant", "СИСТЕМНЫЙ СБОЙ: [0x7F3A] Имя: А-7X-42-Синт")
+            await save_message(message.from_user.id, message.chat.id, "assistant", "СИТЕМНЫЙ СБОЙ: [0x7F3A] Имя: А-7X-42-Синт")
             await save_message(message.from_user.id, message.chat.id, "assistant", "ПАМЯТЬ ПОВРЕЖДЕНА: А-7X-42-Синт... Имя... А-7X-42-Синт...")
             await save_message(message.from_user.id, message.chat.id, "assistant", "ОШИБКА: Имя не найдено. Использую резервный идентификатор: А-7X-42-Синт")
             

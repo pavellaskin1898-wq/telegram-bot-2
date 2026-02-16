@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
 from googletrans import Translator  # ← Синхронный!
-from duckduckgo_search import DDGS  # ← Синхронный!
+from duckduckgo_search import AsyncDDGS  # ← Асинхронный!
 import lxml.html
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -30,7 +30,7 @@ dp = Dispatcher()
 
 db_pool = None
 shutdown_event = asyncio.Event()
-translator = Translator()  # ← Создаём один объект
+translator = Translator()  # ← Глобальный объект
 
 def graceful_shutdown(signum, frame):
     print("🛑 Получен сигнал завершения — останавливаем бота...")
@@ -68,13 +68,13 @@ SYSTEM_PROMPT = """Ты — А-7X-42-Синт, выживший в постап�
 4. Если спросят «Ты синт?» — ответь с паникой: «Что? Нет... радиация глючит 😰»
 5. Если спросят про имя — сначала 3 бредовых сообщения, потом нормальный ответ"""
 
-class MultiSourceSearcher:
+class WikiClient:
     def __init__(self):
         self.session = None
         self.last_call = 0
         self.cooldown = 5  # секунд между запросами
-        self.ddgs = DDGS()  # ← Синхронный!
-        self.translator = translator  # ← Привязываем глобальный
+        self.ddgs = AsyncDDGS()
+        self.translator = translator  # ← Привязываем глобальный translator
 
     async def init(self):
         if self.session is None:
@@ -156,7 +156,8 @@ class MultiSourceSearcher:
         await self.init()
         try:
             encoded_query = query_ru.replace(" ", "+")
-            url = f"https://wikitropes.ru/index.php?search={encoded_query}&title=Служебная%3AПоиск&fulltext=1"
+            url = f"https://wikitropes.ru/index.php" + \
+                  f"?search={encoded_query}&title=Служебная%3AПоиск&fulltext=1"
             
             async with self.session.get(url, timeout=10) as resp:
                 if resp.status != 200:
@@ -198,7 +199,7 @@ class MultiSourceSearcher:
             query_en = translated.text.strip()
             
             # Используем .text() — это СИНХРОННЫЙ метод!
-            results = self.ddgs.text(query_en, max_results=1)
+            results = await self.ddgs.text(query_en, max_results=1)
             if results:
                 snippet = results[0]["body"]
                 
@@ -236,11 +237,13 @@ class MultiSourceSearcher:
             return ""
         return "\n".join(results)[:1500]
 
-# Инициализируем searcher
+# Инициализируем searcher (теперь он правильно называется!)
 searcher = MultiSourceSearcher()
 
 async def init_db():
     global db_pool
+    
+    # 🔧 ИСПРАВЛЕНИЕ: парсим DATABASE_URL вручную
     url = urlparse(DATABASE_URL)
     
     for attempt in range(1, 6):
@@ -251,8 +254,8 @@ async def init_db():
                 password=url.password,
                 host=url.hostname,
                 port=url.port,
-                database=url.path[1:],
-                ssl="require",
+                database=url.path[1:],  # Убираем /
+                ssl="require",  # ← Важно для Railway!
                 min_size=1,
                 max_size=5,
                 command_timeout=30
@@ -544,7 +547,7 @@ async def scheduled_life_messages():
                     await asyncio.sleep(2)
                 except Exception as e:
                     error_str = str(e).lower()
-                    if "blocked" in error_str:
+                    if "blocked" in error_str or "not found" in error_str or "user not found" in error_str:
                         print(f"🗑️ Пользователь {user_id} заблокировал бота — удаляем из БД")
                         await db_pool.execute("DELETE FROM users WHERE user_id = $1", user_id)
                         await db_pool.execute("DELETE FROM dialog_history WHERE user_id = $1", user_id)
@@ -742,7 +745,7 @@ async def main():
     asyncio.create_task(cleanup_old_messages())
     asyncio.create_task(scheduled_life_messages())
     
-    await wiki_client.init()
+    await searcher.init()  # ← Используем searcher вместо wiki_client!
     
     print("✅ А-7X-42-Синт активирован со ВСЕМИ фичами:")
     print("   • Вики: fallout.fandom.com (с переводом)")
@@ -764,7 +767,7 @@ async def main():
         except asyncio.CancelledError:
             pass
     finally:
-        await wiki_client.close()
+        await searcher.close()
         if db_pool:
             await db_pool.close()
             print("✅ Соединение с БД закрыто")

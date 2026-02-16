@@ -290,7 +290,7 @@ async def get_user_status(user_id: int) -> dict:
         "hours_since_seen": hours_since_seen,
         "is_offended": hours_since_reply > 4 and hours_since_seen < 1,
         "is_angry": hours_since_reply > 12 and hours_since_seen < 2,
-        "should_message": hours_since_bot_msg > 3
+        "should_message": hours_since_bot_msg > 2  # Пишет каждые 2 часа
     }
     
     return status
@@ -300,6 +300,39 @@ async def generate_life_message(user_id: int, status: dict) -> str:
     is_offended = status["is_offended"]
     is_angry = status["is_angry"]
     
+    # Сообщения, которые бот сам придумывает
+    self_generated_messages = [
+        f"Сегодня видел гуля в старом здании. Он что-то напевал... по-моему, песню 50-х годов 🎵",
+        f"Мой Пип-бой зафиксировал странный сигнал с севера. Кто-то ещё жив? 📡",
+        f"Нашёл старую карту Бостона. Пометки: «Здесь синт...» — но они зачеркнуты. Странно... 😰",
+        f"Слышал, что рейдеры устроили засаду у старого моста. Надеюсь, никто не попался... 😰",
+        f"Сегодня в руинах был дождь. Радиация в воде... интересно, можно ли её пить после фильтрации? 🤔",
+        f"Видел, как супермутант помогал гулю добраться до укрытия. Неужели у них есть чувство сострадания? 😲",
+        f"Мой ламповый компьютер начал глючить. В логах: «Обнаружена биологическая единица...» — я исправил 🤓",
+        f"Слышал по радио: «Галактика Свободы» передаёт новости. Кто-то ещё выжил в этом мире... 📻",
+        f"В подвале одного дома нашёл уцелевший стимпак. Срок годности — 2287. Как вовремя! 😊",
+        f"Прошёл мимо старого робота-секьюритрона. Он всё ещё патрулирует... хотя все давно мертвы 🤖",
+    ]
+    
+    # Сообщения с вики
+    wiki_subjects = [
+        "гуль", "супермутант", "рейдер", "гуль-пастух", "псионик", "снайпер-рейдер", "дети атома",
+        "гуль-священник", "супермутант-бригадир", "снайпер-рейдер", "гуль-охотник", "псионик-шаман"
+    ]
+    
+    wiki_messages = []
+    for subject in wiki_subjects:
+        try:
+            content = await wiki_client.search_and_get_content(subject)
+            if content:
+                # Берём первые 50 слов
+                words = content.split()[:50]
+                summary = " ".join(words)
+                wiki_messages.append(f"Встретил {subject}! {summary}... 🧟‍♂️")
+        except:
+            pass
+    
+    # Обычные сообщения
     normal_messages = [
         f"Что-то тихо сегодня в руинах... Как твои дела, {username}? 😊",
         f"Мой Пип-бой показывает аномальный уровень радиации к северу отсюда. Ты не был там сегодня?",
@@ -325,12 +358,20 @@ async def generate_life_message(user_id: int, status: dict) -> str:
         f"Хватит. Я ухожу в Институт. Там синты хотя бы не игнорируют друг друга. 😤",
     ]
     
+    # Выбираем тип сообщения
     if is_angry:
         message = random.choice(angry_messages)
     elif is_offended:
         message = random.choice(offended_messages)
     else:
-        message = random.choice(normal_messages)
+        # 50% шанс на вики-сообщение, 30% на самогенерацию, 20% на обычное
+        choice = random.random()
+        if choice < 0.5 and wiki_messages:
+            message = random.choice(wiki_messages)
+        elif choice < 0.8:
+            message = random.choice(self_generated_messages)
+        else:
+            message = random.choice(normal_messages)
     
     if random.random() < 0.2:
         glitches = [
@@ -344,7 +385,7 @@ async def generate_life_message(user_id: int, status: dict) -> str:
     return message
 
 async def scheduled_life_messages():
-    print("⏰ Запущена фоновая задача 'жизни' бота")
+    print("⏰ Запущена фоновая задача 'жизни' бота (каждые 2 часа)")
     
     while not shutdown_event.is_set():
         try:
@@ -356,7 +397,7 @@ async def scheduled_life_messages():
                 ORDER BY last_message_from_bot ASC
                 LIMIT 10
                 ''',
-                now - timedelta(hours=3)
+                now - timedelta(hours=2)  # Каждые 2 часа
             )
             
             for user in users:
@@ -385,7 +426,7 @@ async def scheduled_life_messages():
                         await db_pool.execute("DELETE FROM dialog_history WHERE user_id = $1", user_id)
             
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=600)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=120)  # Проверяем каждые 2 минуты
             except asyncio.TimeoutError:
                 continue
                 
@@ -441,7 +482,15 @@ async def get_yandex_response(prompt: str, history: list, wiki_context: str = ""
                 
                 # Добавляем атрибуцию в конце ответа, если был контекст из вики
                 if wiki_context:
-                    response_text += "\n\n📚 *ИСТОЧНИК: Архивы Института v2287.1*"
+                    response_text += (
+                        "\n\n────────────────────────────\n"
+                        "🔍 *АРХИВНЫЙ ОТЧЁТ*\n"
+                        "• ИСТОЧНИК: БАЗА ДАННЫХ ИНСТИТУТА v2287.1\n"
+                        "• ОБНОВЛЕНО: 23.10.2077 14:47:32\n"
+                        "• СТАТУС: АКТИВЕН\n"
+                        "• ПРОВЕРКА: ПОДТВЕРЖДЕНО (Пип-бой: OK)\n"
+                        "────────────────────────────"
+                    )
                 
                 return response_text
         except asyncio.TimeoutError:
@@ -576,7 +625,8 @@ async def main():
     print("✅ А-7X-42-Синт активирован со ВСЕМИ фичами:")
     print("   • Вики: запросы к fallout.wiki")
     print("   • Память: 24 часа в PostgreSQL")
-    print("   • Жизнь: 5-6 сообщений в день + обида при игноре")
+    print("   • Жизнь: каждые 2 часа — рандомные сообщения")
+    print("   • Вики-сообщения: встречи с мутантами, рейдерами")
     print("   • Глюки: 3 бредовых сообщения при вопросе про имя")
     print("   • Синт-природа: скрытые странности и системные сбои")
     print("   • HTTP-здоровье: порт", PORT)

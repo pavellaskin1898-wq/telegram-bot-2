@@ -128,6 +128,8 @@ wiki_client = WikiClient()
 async def init_db():
     """Инициализация БД для хранения истории диалогов и пользователей"""
     global db_pool
+    
+    # Создаём пул подключений напрямую из DATABASE_URL
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     
     # Таблица истории диалогов (24 часа хранения)
@@ -161,17 +163,19 @@ async def init_db():
     await db_pool.execute('CREATE INDEX IF NOT EXISTS idx_users_last_bot ON users(last_message_from_bot)')
     
     print("✅ База данных для памяти и пользователей инициализирована")
+    print(f"✅ DATABASE_URL: {DATABASE_URL[:20]}...")
 
 async def cleanup_old_messages():
     """Очистка сообщений старше 24 часов"""
     while True:
         try:
             cutoff = datetime.utcnow() - timedelta(hours=24)
-            deleted = await db_pool.execute(
+            result = await db_pool.execute(
                 "DELETE FROM dialog_history WHERE created_at < $1",
                 cutoff
             )
-            print(f"🧹 Очищено старых сообщений: {deleted}")
+            deleted = result.split(" ")[-1] if " " in result else "0"
+            print(f"🧹 Очищено {deleted} старых сообщений")
         except Exception as e:
             print(f"⚠️ Ошибка очистки: {e}")
         
@@ -190,10 +194,17 @@ async def save_message(user_id: int, chat_id: int, role: str, content: str):
         )
         
         # Обновляем пользователя
-        username = None
         if role == "user":
-            # Получаем имя пользователя из последнего сообщения (если есть)
-            username = content[:50] if len(content) < 50 else content[:50] + "..."
+            username = None
+            if hasattr(bot, 'get_chat_member'):
+                try:
+                    member = await bot.get_chat_member(chat_id, user_id)
+                    username = member.user.first_name or "выживший"
+                except:
+                    username = "выживший"
+            else:
+                username = "выживший"
+            
             await db_pool.execute(
                 '''
                 INSERT INTO users (user_id, chat_id, username, last_message_from_user, last_seen)
@@ -273,9 +284,9 @@ async def get_user_status(user_id: int) -> dict:
         "hours_since_reply": hours_since_reply,
         "hours_since_bot_msg": hours_since_bot_msg,
         "hours_since_seen": hours_since_seen,
-        "is_offended": hours_since_reply > 4 and hours_since_seen < 1,  # Видел сообщение но не ответил >4ч
-        "is_angry": hours_since_reply > 12 and hours_since_seen < 2,    # Игнорирует >12ч
-        "should_message": hours_since_bot_msg > 3  # Пора написать (каждые 3-4 часа)
+        "is_offended": hours_since_reply > 4 and hours_since_seen < 1,
+        "is_angry": hours_since_reply > 12 and hours_since_seen < 2,
+        "should_message": hours_since_bot_msg > 3
     }
     
     return status
@@ -286,7 +297,6 @@ async def generate_life_message(user_id: int, status: dict) -> str:
     is_offended = status["is_offended"]
     is_angry = status["is_angry"]
     
-    # Шаблоны сообщений
     normal_messages = [
         f"Что-то тихо сегодня в руинах... Как твои дела, {username}? 😊",
         f"Мой Пип-бой показывает аномальный уровень радиации к северу отсюда. Ты не был там сегодня?",
@@ -312,7 +322,6 @@ async def generate_life_message(user_id: int, status: dict) -> str:
         f"Хватит. Я ухожу в Институт. Там синты хотя бы не игнорируют друг друга. 😤",
     ]
     
-    # Выбираем сообщение в зависимости от настроения
     if is_angry:
         message = random.choice(angry_messages)
     elif is_offended:
@@ -320,7 +329,6 @@ async def generate_life_message(user_id: int, status: dict) -> str:
     else:
         message = random.choice(normal_messages)
     
-    # Иногда добавляем "странность" синта
     if random.random() < 0.2:
         glitches = [
             " [Пип-бой: СИСТЕМНЫЙ СБОЙ 0.3с]",
@@ -334,10 +342,11 @@ async def generate_life_message(user_id: int, status: dict) -> str:
 
 async def scheduled_life_messages():
     """Фоновая задача: отправка живых сообщений каждые 3-4 часа"""
+    print("⏰ Запущена фоновая задача 'жизни' бота (каждые 3-4 часа)")
+    
     while True:
         try:
             now = datetime.utcnow()
-            # Выбираем пользователей, которым пора написать (последнее сообщение бота >3 часов назад)
             users = await db_pool.fetch(
                 '''
                 SELECT user_id, chat_id FROM users 
@@ -352,33 +361,24 @@ async def scheduled_life_messages():
                 user_id = user['user_id']
                 chat_id = user['chat_id']
                 
-                # Получаем статус пользователя
                 status = await get_user_status(user_id)
                 if not status or not status["should_message"]:
                     continue
                 
-                # Генерируем сообщение
                 message = await generate_life_message(user_id, status)
                 
-                # Отправляем
                 try:
                     await bot.send_message(chat_id, message)
-                    print(f"💬 Отправлено живое сообщение пользователю {user_id}: {message[:50]}...")
-                    
-                    # Сохраняем в историю
+                    print(f"💬 Отправлено живое сообщение {user_id}: {message[:50]}...")
                     await save_message(user_id, chat_id, "assistant", message)
-                    
-                    # Пауза между сообщениями (чтобы не спамить)
                     await asyncio.sleep(2)
-                    
                 except Exception as e:
-                    print(f"⚠️ Ошибка отправки живого сообщения {user_id}: {e}")
-                    # Если ошибка (пользователь заблокировал), удаляем из БД
-                    if "blocked" in str(e).lower() or "not found" in str(e).lower():
+                    error_str = str(e).lower()
+                    if "blocked" in error_str or "not found" in error_str or "user not found" in error_str:
+                        print(f"🗑️ Пользователь {user_id} заблокировал бота — удаляем из БД")
                         await db_pool.execute("DELETE FROM users WHERE user_id = $1", user_id)
                         await db_pool.execute("DELETE FROM dialog_history WHERE user_id = $1", user_id)
             
-            # Следующая проверка через 10 минут
             await asyncio.sleep(600)
             
         except Exception as e:
@@ -387,7 +387,6 @@ async def scheduled_life_messages():
 
 # ============ ПРОВЕРКА ЗАПРОСОВ ПРО ИМЯ ============
 def is_name_query(text: str) -> bool:
-    """Проверяет, есть ли в запросе упоминание имени"""
     keywords = ["имя", "зовут", "как тебя", "ты кто", "кто ты", "назови себя", "какое имя", "твое имя", "твоё имя"]
     return any(kw in text.lower() for kw in keywords)
 
@@ -436,12 +435,11 @@ async def get_yandex_response(prompt: str, history: list, wiki_context: str = ""
 # ============ ОБРАБОТЧИКИ ============
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    # Сохраняем пользователя при первом контакте
     await save_message(message.from_user.id, message.chat.id, "user", "/start")
     
     await message.answer(
         "👋 *Приветствую, выживший!*\n"
-        "Я — А-7X-42-Синт, обычный человек из руин Бостона.\n"
+        "Я — А-7X-42-Синт, обычный человек из руинах Бостона.\n"
         "Помогаю советами в этом жестоком мире 😊\n\n"
         "💡 Спросите о чём угодно:\n"
         "• Фракции (Братство Стали, Институт)\n"
@@ -455,7 +453,6 @@ async def start_handler(message: Message):
 
 @dp.message(Command("clear"))
 async def clear_handler(message: Message):
-    """Очистка личной истории диалога"""
     try:
         deleted = await db_pool.execute(
             "DELETE FROM dialog_history WHERE user_id = $1",
@@ -470,7 +467,6 @@ async def ai_handler(message: Message):
     if message.content_type != "text" or not message.text:
         return
     
-    # В группах отвечаем только на упоминания или ответы на сообщения бота
     if message.chat.type in ["group", "supergroup"]:
         bot_mentioned = f"@{message.bot.username}" in message.text
         replied_to_bot = (
@@ -483,29 +479,23 @@ async def ai_handler(message: Message):
             return
     
     try:
-        # СОХРАНЯЕМ ВОПРОС И ОБНОВЛЯЕМ АКТИВНОСТЬ
         await save_message(message.from_user.id, message.chat.id, "user", message.text)
         
-        # ПРОВЕРКА ЗАПРОСА ПРО ИМЯ
         if is_name_query(message.text):
-            # Отправляем три бредовых сообщения
             await message.answer("СИСТЕМНЫЙ СБОЙ: [0x7F3A] Имя: А-7X-42-Синт")
             await message.answer("ПАМЯТЬ ПОВРЕЖДЕНА: А-7X-42-Синт... Имя... А-7X-42-Синт...")
             await message.answer("ОШИБКА: Имя не найдено. Использую резервный идентификатор: А-7X-42-Синт")
             
-            # Сохраняем бред в историю
             await save_message(message.from_user.id, message.chat.id, "assistant", "СИСТЕМНЫЙ СБОЙ: [0x7F3A] Имя: А-7X-42-Синт")
             await save_message(message.from_user.id, message.chat.id, "assistant", "ПАМЯТЬ ПОВРЕЖДЕНА: А-7X-42-Синт... Имя... А-7X-42-Синт...")
             await save_message(message.from_user.id, message.chat.id, "assistant", "ОШИБКА: Имя не найдено. Использую резервный идентификатор: А-7X-42-Синт")
             
-            # Нормальный ответ
             history = await get_history(message.from_user.id)
             response = await get_yandex_response(message.text, history, "")
             await save_message(message.from_user.id, message.chat.id, "assistant", response)
             await message.answer(response)
             return
         
-        # ОБЫЧНАЯ ОБРАБОТКА
         history = await get_history(message.from_user.id)
         
         await bot.send_chat_action(message.chat.id, "typing")
@@ -516,7 +506,6 @@ async def ai_handler(message: Message):
         
         response = await get_yandex_response(message.text, history, wiki_content)
         
-        # Добавляем "странность" с 15% шансом
         if random.random() < 0.15 and "SYSTEM:" not in response and "биологическ" not in response.lower():
             glitches = [
                 " [Пип-бой: СИСТЕМНЫЙ СБОЙ 0.3с]",
@@ -537,19 +526,24 @@ async def ai_handler(message: Message):
 async def main():
     global db_pool
     
-    print("🚀 Инициализация Синта с памятью и 'жизнью'...")
+    print("🚀 Инициализация Синта А-7X-42-Синт...")
+    print(f"YC_FOLDER_ID: {YC_FOLDER_ID}")
+    print(f"ALLOWED_USERS: {ALLOWED_USERS}")
     
     # Инициализируем БД
     await init_db()
     asyncio.create_task(cleanup_old_messages())
-    asyncio.create_task(scheduled_life_messages())  # ЗАПУСКАЕМ ФОНОВУЮ ЗАДАЧУ ЖИЗНИ
+    asyncio.create_task(scheduled_life_messages())
     
     # Инициализируем клиент вики
     await wiki_client.init()
     
-    print("✅ Синт А-7X-42-Синт активирован с полной 'жизнью'!")
-    print(f"YC_FOLDER_ID: {YC_FOLDER_ID}")
-    print("💬 Бот будет писать 5-6 раз в день, обижаться при игноре и вести себя как живой человек!")
+    print("✅ А-7X-42-Синт активирован со ВСЕМИ фичами:")
+    print("   • Вики: запросы к fallout.wiki")
+    print("   • Память: 24 часа в PostgreSQL")
+    print("   • Жизнь: 5-6 сообщений в день + обида при игноре")
+    print("   • Глюки: 3 бредовых сообщения при вопросе про имя")
+    print("   • Синт-природа: скрытые странности и системные сбои")
     
     try:
         await dp.start_polling(bot)
@@ -557,6 +551,7 @@ async def main():
         await wiki_client.close()
         if db_pool:
             await db_pool.close()
+            print("✅ Соединение с БД закрыто")
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -12,6 +12,7 @@ import asyncpg
 import signal
 import sys
 from urllib.parse import urlparse
+from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
@@ -135,19 +136,50 @@ class WikiClient:
 
 wiki_client = WikiClient()
 
+async def safe_execute(pool, query, *args):
+    """Безопасное выполнение запроса с повторной попыткой при разрыве соединения"""
+    for attempt in range(3):
+        try:
+            return await pool.execute(query, *args)
+        except (InterfaceError, ConnectionDoesNotExistError) as e:
+            print(f"⚠️ Соединение с БД разорвано — переподключаюсь... (попытка {attempt+1}/3)")
+            if attempt == 2:
+                raise
+            await asyncio.sleep(1)
+            # Пересоздаём пул (если нужно)
+            global db_pool
+            if db_pool:
+                await db_pool.close()
+            await init_db()  # Пересоздаём пул
+            continue
+
 async def init_db():
     global db_pool
     url = urlparse(DATABASE_URL)
     
-    db_pool = await asyncpg.create_pool(
-        user=url.username,
-        password=url.password,
-        host=url.hostname,
-        port=url.port,
-        database=url.path[1:],
-        ssl="require"
-    )
+    # Повторные попытки подключения (макс. 5)
+    for attempt in range(1, 6):
+        try:
+            print(f"🔄 Попытка подключения к БД ({attempt}/5)...")
+            db_pool = await asyncpg.create_pool(
+                user=url.username,
+                password=url.password,
+                host=url.hostname,
+                port=url.port,
+                database=url.path[1:],
+                ssl="require",
+                min_size=1,
+                max_size=5,
+                command_timeout=30
+            )
+            break
+        except Exception as e:
+            print(f"⚠️ Ошибка подключения (попытка {attempt}): {e}")
+            if attempt == 5:
+                raise
+            await asyncio.sleep(2)
     
+    # Создаём таблицы
     await db_pool.execute('''
         CREATE TABLE IF NOT EXISTS dialog_history (
             id SERIAL PRIMARY KEY,
@@ -232,68 +264,84 @@ async def save_message(user_id: int, chat_id: int, role: str, content: str):
                 ''',
                 user_id, chat_id
             )
+    except (asyncpg.exceptions.InterfaceError, asyncpg.exceptions.ConnectionDoesNotExistError) as e:
+        print(f"⚠️ Ошибка БД при сохранении: {e} — игнорируем (сообщение не критично)")
     except Exception as e:
-        print(f"⚠️ Ошибка сохранения: {e}")
+        print(f"⚠️ Серьёзная ошибка сохранения: {e}")
 
 async def get_history(user_id: int, limit: int = 8) -> list:
-    cutoff = datetime.utcnow() - timedelta(hours=24)
-    
-    rows = await db_pool.fetch(
-        '''
-        SELECT role, content FROM dialog_history
-        WHERE user_id = $1 AND created_at > $2
-        ORDER BY created_at ASC
-        LIMIT $3
-        ''',
-        user_id, cutoff, limit
-    )
-    
-    history = []
-    for row in rows:
-        history.append({
-            "role": "user" if row['role'] == 'user' else 'assistant',
-            "text": row['content']
-        })
-    
-    return history
+    try:
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        
+        rows = await db_pool.fetch(
+            '''
+            SELECT role, content FROM dialog_history
+            WHERE user_id = $1 AND created_at > $2
+            ORDER BY created_at ASC
+            LIMIT $3
+            ''',
+            user_id, cutoff, limit
+        )
+        
+        history = []
+        for row in rows:
+            history.append({
+                "role": "user" if row['role'] == 'user' else 'assistant',
+                "text": row['content']
+            })
+        
+        return history
+    except (asyncpg.exceptions.InterfaceError, asyncpg.exceptions.ConnectionDoesNotExistError) as e:
+        print(f"⚠️ Ошибка БД при чтении истории: {e} — возвращаю пустую историю")
+        return []
+    except Exception as e:
+        print(f"⚠️ Серьёзная ошибка чтения истории: {e}")
+        return []
 
 async def get_user_status(user_id: int) -> dict:
-    row = await db_pool.fetchrow(
-        '''
-        SELECT 
-            last_message_from_user, 
-            last_message_from_bot,
-            last_seen,
-            username
-        FROM users 
-        WHERE user_id = $1
-        ''',
-        user_id
-    )
-    
-    if not row:
+    try:
+        row = await db_pool.fetchrow(
+            '''
+            SELECT 
+                last_message_from_user, 
+                last_message_from_bot,
+                last_seen,
+                username
+            FROM users 
+            WHERE user_id = $1
+            ''',
+            user_id
+        )
+        
+        if not row:
+            return None
+        
+        now = datetime.utcnow()
+        last_user_msg = row['last_message_from_user']
+        last_bot_msg = row['last_message_from_bot']
+        last_seen = row['last_seen']
+        
+        hours_since_reply = (now - last_user_msg).total_seconds() / 3600
+        hours_since_bot_msg = (now - last_bot_msg).total_seconds() / 3600
+        hours_since_seen = (now - last_seen).total_seconds() / 3600
+        
+        status = {
+            "username": row['username'] or "выживший",
+            "hours_since_reply": hours_since_reply,
+            "hours_since_bot_msg": hours_since_bot_msg,
+            "hours_since_seen": hours_since_seen,
+            "is_offended": hours_since_reply > 4 and hours_since_seen < 1,
+            "is_angry": hours_since_reply > 12 and hours_since_seen < 2,
+            "should_message": hours_since_bot_msg > 2  # Пишет каждые 2 часа
+        }
+        
+        return status
+    except (asyncpg.exceptions.InterfaceError, asyncpg.exceptions.ConnectionDoesNotExistError) as e:
+        print(f"⚠️ Ошибка БД при чтении статуса: {e} — возвращаю None")
         return None
-    
-    now = datetime.utcnow()
-    last_user_msg = row['last_message_from_user']
-    last_bot_msg = row['last_message_from_bot']
-    last_seen = row['last_seen']
-    
-    hours_since_reply = (now - last_user_msg).total_seconds() / 3600
-    hours_since_bot_msg = (now - last_bot_msg).total_seconds() / 3600
-    hours_since_seen = (now - last_seen).total_seconds() / 3600
-    
-    status = {
-        "username": row['username'] or "выживший",
-        "hours_since_reply": hours_since_reply,
-        "hours_since_bot_msg": hours_since_bot_msg,
-        "hours_since_seen": hours_since_seen,
-        "is_offended": hours_since_reply > 4 and hours_since_seen < 1,
-        "is_angry": hours_since_reply > 12 and hours_since_seen < 2,
-        "should_message": hours_since_bot_msg > 2  # Пишет каждые 2 часа
-    }
-    
-    return status
+    except Exception as e:
+        print(f"⚠️ Серьёзная ошибка чтения статуса: {e}")
+        return None
 
 async def generate_life_message(user_id: int, status: dict) -> str:
     username = status["username"]
@@ -624,7 +672,7 @@ async def main():
     
     print("✅ А-7X-42-Синт активирован со ВСЕМИ фичами:")
     print("   • Вики: запросы к fallout.wiki")
-    print("   • Память: 24 часа в PostgreSQL")
+    print("   • Память: 24 часа в PostgreSQL (устойчиво)")
     print("   • Жизнь: каждые 2 часа — рандомные сообщения")
     print("   • Вики-сообщения: встречи с мутантами, рейдерами")
     print("   • Глюки: 3 бредовых сообщения при вопросе про имя")

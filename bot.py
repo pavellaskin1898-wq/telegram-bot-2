@@ -379,7 +379,7 @@ async def scheduled_life_messages():
                     await asyncio.sleep(2)
                 except Exception as e:
                     error_str = str(e).lower()
-                    if "blocked" in error_str or "not found" in error_str:
+                    if "blocked" in error_str or "not found" in error_str or "user not found" in error_str:
                         print(f"🗑️ Пользователь {user_id} заблокировал бота — удаляем из БД")
                         await db_pool.execute("DELETE FROM users WHERE user_id = $1", user_id)
                         await db_pool.execute("DELETE FROM dialog_history WHERE user_id = $1", user_id)
@@ -408,10 +408,12 @@ async def get_yandex_response(prompt: str, history: list, wiki_context: str = ""
     for msg in history[-6:]:
         messages.append(msg)
     
+    # Добавляем атрибуцию к вики-контексту
     if wiki_context:
+        wiki_with_attr = f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ ИНСТИТУТА:\n{wiki_context}\n\n[ИСТОЧНИК: БАЗА ДАННЫХ ИНСТИТУТА v2287.1 | ОБНОВЛЕНО: 23.10.2077 14:47:32 | СТАТУС: АКТИВЕН]"
         messages.append({
             "role": "system",
-            "text": f"СПРАВОЧНЫЕ ДАННЫЕ:\n{wiki_context}"
+            "text": wiki_with_attr
         })
     
     messages.append({"role": "user", "text": prompt})
@@ -435,7 +437,13 @@ async def get_yandex_response(prompt: str, history: list, wiki_context: str = ""
                     return f"❌ Сбой в системе: {result.get('error', {}).get('message', 'Неизвестная ошибка')} 😰"
                 if 'result' not in result or not result['result'].get('alternatives'):
                     return "❌ Мой Пип-бой завис... Попробуйте позже 🤖"
-                return result['result']['alternatives'][0]['message']['text']
+                response_text = result['result']['alternatives'][0]['message']['text']
+                
+                # Добавляем атрибуцию в конце ответа, если был контекст из вики
+                if wiki_context:
+                    response_text += "\n\n📚 *ИСТОЧНИК: Архивы Института v2287.1*"
+                
+                return response_text
         except asyncio.TimeoutError:
             return "⏳ Обработка данных... Подождите 😊"
         except Exception as e:
@@ -501,7 +509,7 @@ async def ai_handler(message: Message):
             history = await get_history(message.from_user.id)
             response = await get_yandex_response(message.text, history, "")
             await save_message(message.from_user.id, message.chat.id, "assistant", response)
-            await message.answer(response)
+            await message.answer(response, parse_mode="Markdown")
             return
         
         history = await get_history(message.from_user.id)
@@ -513,6 +521,7 @@ async def ai_handler(message: Message):
             wiki_content = await wiki_client.search_and_get_content(message.text)
             if wiki_content:
                 print(f"🌐 Запрос к fallout.wiki: '{message.text[:30]}...' → найдено {len(wiki_content)} символов")
+                print(f"📚 ИСТОЧНИК: База данных Института v2287.1 — обновлено 23.10.2077")
         
         response = await get_yandex_response(message.text, history, wiki_content)
         

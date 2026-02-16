@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
 from googletrans import Translator
-from duckduckgo_search import AsyncDDGS
+from duckduckgo_search import DDGS
 import lxml.html
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -68,13 +68,13 @@ SYSTEM_PROMPT = """Ты — А-7X-42-Синт, выживший в постап�
 4. Если спросят «Ты синт?» — ответь с паникой: «Что? Нет... радиация глючит 😰»
 5. Если спросят про имя — сначала 3 бредовых сообщения, потом нормальный ответ"""
 
-class MultiSourceSearcher:  # ← Исправлено: было WikiClient
+class MultiSourceSearcher:
     def __init__(self):
         self.session = None
         self.last_call = 0
         self.cooldown = 5  # секунд между запросами
-        self.ddgs = AsyncDDGS()
-        self.translator = translator  # ← Привязываем глобальный translator
+        self.ddgs = DDGS()  # ← Синхронный!
+        self.translator = translator  # ← Привязываем глобальный
 
     async def init(self):
         if self.session is None:
@@ -98,7 +98,7 @@ class MultiSourceSearcher:  # ← Исправлено: было WikiClient
         return text.strip()
 
     async def search_fandom(self, query_ru: str) -> str:
-        """Поиск на fallout.fandom.com"""
+        """Поиск на fallout.fandom.com (исправлено!)"""
         await self.init()
         try:
             # Переводим запрос на английский (синхронно!)
@@ -165,7 +165,7 @@ class MultiSourceSearcher:  # ← Исправлено: было WikiClient
                 text = await resp.text()
             
             tree = lxml.html.fromstring(text)
-            links = tree.xpath("//div[@class='mw-search-result-heading']/a/@href")
+            links = tree.xpath("//div[@class='searchresult']/a/@href")
             if not links:
                 return ""
             
@@ -192,14 +192,14 @@ class MultiSourceSearcher:  # ← Исправлено: было WikiClient
             return ""
 
     async def search_web(self, query_ru: str) -> str:
-        """Поиск через DuckDuckGo"""
+        """Поиск через DuckDuckGo (синхронный!)"""
         try:
             # Переводим запрос (синхронно!)
             translated = self.translator.translate(query_ru, dest='en', src='auto')
             query_en = translated.text.strip()
             
-            # Используем .text() — это АСИНХРОННЫЙ метод, возвращает list!
-            results = await self.ddgs.text(query_en, max_results=1)
+            # Используем .text() — это СИНХРОННЫЙ метод!
+            results = self.ddgs.text(query_en, max_results=1)
             if results:
                 snippet = results[0]["body"]
                 

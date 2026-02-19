@@ -17,7 +17,7 @@ import time
 from googletrans import Translator
 from duckduckgo_search import AsyncDDGS
 import lxml.html
-import docx  # ← Для чтения .docx
+import docx
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
@@ -25,6 +25,7 @@ YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "all").split(",")
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", "8080"))
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # ← Добавь переменную: -1001234567890
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -188,7 +189,7 @@ class MultiSourceSearcher:
                     pass
             return content[:800]
         except Exception as e:
-            print(f"❌ TV Tropes: {e}")
+            print(f"❌ TVTropes: {e}")
             return ""
 
     async def search_web(self, query_ru: str) -> str:
@@ -226,7 +227,7 @@ class MultiSourceSearcher:
         results = []
         for name, coro in sources:
             try:
-                result = await coro  # ← await!
+                result = await coro
                 if result:
                     results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
             except Exception as e:
@@ -237,7 +238,6 @@ class MultiSourceSearcher:
             return ""
         return "\n".join(results)[:1500]
 
-# Инициализируем searcher
 searcher = MultiSourceSearcher()
 
 async def load_adventures_from_docx(file_path: str = "/app/adventures.docx") -> list:
@@ -261,15 +261,12 @@ async def load_adventures_from_docx(file_path: str = "/app/adventures.docx") -> 
             "Наткнулся на рейдеров, которые охраняли старую детскую площадку. В центре — сломанный робот-журавлик. Они сказали: «Это святое». Что за бред? Но я не стал спорить... 😰",
             "Спрятался в подвале, когда мимо проходила банда рейдеров. Один из них нёс в руках... куклу Барби. Он шептал ей: «Мы найдём его... обязательно». Кого? 🤔",
             "Рейдеры устроили «рынок» в старом торговом центре. Торговали стимпаками за патроны. Я купил один — цена в 3 энергоклетки. Дорого, но иначе не выжить 😰.",
-            "Нашёл старый терминал убежища... Он работал! На экране: «Добро пожаловать, гражданин А-7X-42-Синт». Я? Но я же человек... Пип-бой молчит 🤖.",
             "Мой ламповый компьютер начал глючить. В логах: «Обнаружена биологическая единица...» — я быстро стёр строку. Не хочу думать, что это значило 🤓.",
+            "Нашёл старый терминал убежища... Он работал! На экране: «Добро пожаловать, гражданин А-7X-42-Синт». Я? Но я же человек... Пип-бой молчит 🤖.",
             "Встретил выжившего в руинах. Он был весь в шрамах, но улыбался. «Я из НКР», — сказал он. Потом добавил: «Но теперь я просто человек». Странно... 🤔",
-            "Один выживший торговал информацией. За стимпак он рассказал, что в Институте создают... не синтов. А что-то другое. Я не стал узнавать подробностей 😰.",
-            "Видел, как двое выживших ссорились из-за банки тушенки. Один вытащил нож... другой — плазменный пистолет. Я ушёл. В этом мире каждый за себя 😔.",
         ]
 
-# Загружаем истории при запуске
-adventure_stories = []
+adventure_stories = []  # ← Глобальная переменная для историй
 
 async def init_db():
     global db_pool
@@ -459,27 +456,29 @@ async def get_user_status(user_id: int) -> dict:
         print(f"⚠️ Серьёзная ошибка чтения статуса: {e}")
         return None
 
-async def generate_adventure_message(user_id: int, status: dict) -> str:
-    """Генерирует приключенческое сообщение из .docx файла"""
+async def generate_adventure_message(status: dict = None) -> str:
+    """Генерирует приключенческое сообщение (для лички и канала)"""
     global adventure_stories
-    username = status["username"]
-    is_offended = status["is_offended"]
-    is_angry = status["is_angry"]
-    
-    # Загружаем истории (один раз при старте)
     if not adventure_stories:
         adventure_stories = await load_adventures_from_docx()
     
-    # Выбираем случайную историю
     story = random.choice(adventure_stories)
     
-    # Добавляем эмоции
-    if is_angry:
-        story += f" Надеюсь, ты не так равнодушен к моим историям, {username}... 😠"
-    elif is_offended:
-        story += f" Ты бы тоже мог поделиться, чем занимаешься... 😔"
+    # Если статус передан — добавляем эмоции
+    if status:
+        username = status["username"]
+        is_offended = status["is_offended"]
+        is_angry = status["is_angry"]
+        
+        if is_angry:
+            story += f" Надеюсь, ты не так равнодушен к моим историям, {username}... 😠"
+        elif is_offended:
+            story += f" Ты бы тоже мог поделиться, чем занимаешься... 😔"
+        else:
+            story += f" А ты чем сегодня занимался, {username}? 😊"
     else:
-        story += f" А ты чем сегодня занимался, {username}? 😊"
+        # Для канала — добавляем общую подпись
+        story += f"\n\n🧟‍♂️ *Из руин Бостона*"
     
     # Редкий глюк (10% шанс)
     if random.random() < 0.1:
@@ -499,6 +498,18 @@ async def scheduled_life_messages():
     while not shutdown_event.is_set():
         try:
             now = datetime.utcnow()
+            
+            # === ПИШЕМ В КАНАЛ ===
+            if CHANNEL_ID:
+                try:
+                    channel_message = await generate_adventure_message()
+                    await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+                    print(f"📢 Отправлено в канал {CHANNEL_ID}: {channel_message[:50]}...")
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"❌ Ошибка отправки в канал: {e}")
+            
+            # === ПИШЕМ В ЛИЧКУ ===
             users = await db_pool.fetch(
                 '''
                 SELECT user_id, chat_id FROM users 
@@ -520,11 +531,11 @@ async def scheduled_life_messages():
                 if not status or not status["should_message"]:
                     continue
                 
-                message = await generate_adventure_message(user_id, status)
+                message = await generate_adventure_message(status)
                 
                 try:
-                    await bot.send_message(chat_id, message)
-                    print(f"💬 Отправлено приключение {user_id}: {message[:50]}...")
+                    await bot.send_message(chat_id, message, parse_mode="Markdown")
+                    print(f"💬 Отправлено в личку {user_id}: {message[:50]}...")
                     await save_message(user_id, chat_id, "assistant", message)
                     await asyncio.sleep(2)
                 except Exception as e:
@@ -639,6 +650,36 @@ async def ai_handler(message: Message):
     if message.content_type != "text" or not message.text:
         return
     
+    # === ОТВЕЧАЕМ В КАНАЛЕ ===
+    if message.chat.type == "channel":
+        if CHANNEL_ID and str(message.chat.id) == CHANNEL_ID:
+            # В канале отвечаем на упоминания
+            if f"@{message.bot.username}" in message.text:
+                await bot.send_chat_action(message.chat.id, "typing")
+                
+                wiki_content = ""
+                if len(message.text.split()) > 3 and random.random() > 0.4:
+                    wiki_content = await searcher.search_all(message.text)
+                    if wiki_content:
+                        print(f"🌐 Запрос к мультиархивам: '{message.text[:30]}...' → найдено {len(wiki_content)} символов")
+                
+                history = []  # В канале нет истории
+                response = await get_yandex_response(message.text, history, wiki_content)
+                
+                if random.random() < 0.15 and "SYSTEM:" not in response and "биологическ" not in response.lower():
+                    glitches = [
+                        " [Пип-бой: СИСТЕМНЫЙ СБОЙ 0.3с]",
+                        " ...странно, я точно помню эту дату: 23 октября 2077, 14:47...",
+                        " (обработка данных завершена)",
+                        " ...почему я не чувствую голода уже 72 часа? Ладно, неважно 😊",
+                        " [Память: 98.7%]"
+                    ]
+                    response += random.choice(glitches)
+                
+                await message.reply(response, parse_mode="Markdown")
+        return
+    
+    # === ОТВЕЧАЕМ В ЧАТАХ ===
     if message.chat.type in ["group", "supergroup"]:
         bot_mentioned = f"@{message.bot.username}" in message.text
         replied_to_bot = (
@@ -678,15 +719,7 @@ async def ai_handler(message: Message):
             if wiki_content:
                 print(f"🌐 Запрос к мультиархивам: '{message.text[:30]}...' → найдено {len(wiki_content)} символов")
         
-        # 🔥 Добавляем вики в историю, чтобы YandexGPT понял контекст
-        full_history = history[:]
-        if wiki_content:
-            full_history.append({
-                "role": "system",
-                "text": f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ ИНСТИТУТА:\n{wiki_content}"
-            })
-        
-        response = await get_yandex_response(message.text, full_history, "")
+        response = await get_yandex_response(message.text, history, wiki_content)
         
         if random.random() < 0.15 and "SYSTEM:" not in response and "биологическ" not in response.lower():
             glitches = [
@@ -727,6 +760,7 @@ async def main():
     print("🚀 Инициализация Синта А-7X-42-Синт...")
     print(f"YC_FOLDER_ID: {YC_FOLDER_ID}")
     print(f"PORT: {PORT}")
+    print(f"CHANNEL_ID: {CHANNEL_ID}")
     
     http_runner = await start_http_server()
     
@@ -741,7 +775,8 @@ async def main():
     print("   • TV Tropes: wikitropes.ru (юмор и тропы)")
     print("   • Web: DuckDuckGo (общий поиск)")
     print("   • Память: 24 часа в PostgreSQL (устойчиво)")
-    print("   • Жизнь: каждые 2 часа — приключенческие сообщения из .docx")
+    print("   • Жизнь: каждые 2 часа — приключения в личку И в канал")
+    print("   • Канал: отвечает на упоминания")
     print("   • Глюки: 3 бредовых сообщения при вопросе про имя")
     print("   • Синт-природа: скрытые странности и системные сбои")
     print("   • HTTP-здоровье: порт", PORT)

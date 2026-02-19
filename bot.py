@@ -15,11 +15,10 @@ from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
 from googletrans import Translator
-from duckduckgo_search import DDGS
-import fitz  # PyMuPDF
+from duckduckgo_search import AsyncDDGS
 import lxml.html
+import docx  # ← Для чтения .docx
 
-# === ENVIRONMENT VARIABLES ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
@@ -30,11 +29,9 @@ PORT = int(os.getenv("PORT", "8080"))
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# === GLOBAL VARIABLES ===
 db_pool = None
 shutdown_event = asyncio.Event()
-translator = Translator()  # ← Синхронный переводчик
-ddgs = DDGS()  # ← Синхронный DDGS
+translator = Translator()
 
 def graceful_shutdown(signum, frame):
     print("🛑 Получен сигнал завершения — останавливаем бота...")
@@ -72,63 +69,13 @@ SYSTEM_PROMPT = """Ты — А-7X-42-Синт, выживший в постап�
 4. Если спросят «Ты синт?» — ответь с паникой: «Что? Нет... радиация глючит 😰»
 5. Если спросят про имя — сначала 3 бредовых сообщения, потом нормальный ответ"""
 
-class BibleSearcher:
-    def __init__(self, path: str = "/app/Biblia_Fallout.pdf"):
-        self.path = path
-        self.content = ""
-        self.load_bible()
-
-    def load_bible(self):
-        """Синхронная загрузка Библии из PDF"""
-        try:
-            doc = fitz.open(self.path)
-            text = ""
-            for page in doc:
-                text += page.get_text() + "\n"
-            doc.close()
-            self.content = text
-            print(f"📚 Библия Фоллаута загружена ({len(text)} символов)")
-        except FileNotFoundError:
-            print(f"⚠️ Файл Библии не найден: {self.path}")
-            self.content = ""
-        except Exception as e:
-            print(f"❌ Ошибка загрузки Библии: {e}")
-            self.content = ""
-
-    def search(self, query: str) -> str:
-        """Поиск в Библии по фразе (синхронно)"""
-        if not self.content:
-            return ""
-
-        # Переводим запрос на английский (синхронно!)
-        try:
-            translated = translator.translate(query, dest='en', src='auto')
-            query_en = translated.text.lower()
-        except:
-            query_en = query.lower()
-
-        # Ищем в тексте
-        matches = []
-        lines = self.content.split('\n')
-        for i, line in enumerate(lines):
-            if query_en in line.lower():
-                start = max(0, i - 2)
-                end = min(len(lines), i + 3)
-                context = "\n".join(lines[start:end])
-                matches.append(context.strip())
-
-        if not matches:
-            return ""
-
-        result = "\n\n".join(matches[:2])  # первые 2 совпадения
-        return result[:1000]
-
 class MultiSourceSearcher:
     def __init__(self):
         self.session = None
-        self.bible = BibleSearcher()  # ← Добавляем Библию!
-        self.ddgs = ddgs  # ← Привязываем глобальный
-        self.translator = translator  # ← Привязываем глобальный
+        self.last_call = 0
+        self.cooldown = 5  # секунд между запросами
+        self.ddgs = AsyncDDGS()
+        self.translator = translator
 
     async def init(self):
         if self.session is None:
@@ -140,7 +87,7 @@ class MultiSourceSearcher:
         if self.session:
             await self.session.close()
 
-    def _clean_html(self, html: str) -> str:
+    async def _clean_html(self, html: str) -> str:
         html = re.sub(r'<script.*?>.*?</script>', '', html, flags=re.DOTALL)
         html = re.sub(r'<style.*?>.*?</style>', '', html, flags=re.DOTALL)
         html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
@@ -152,7 +99,7 @@ class MultiSourceSearcher:
         return text.strip()
 
     async def search_fandom(self, query_ru: str) -> str:
-        """Поиск на fallout.fandom.com (синхронный перевод!)"""
+        """Поиск на fallout.fandom.com"""
         await self.init()
         try:
             # Переводим запрос (синхронно!)
@@ -192,7 +139,7 @@ class MultiSourceSearcher:
                     return ""
                 
                 html = data["parse"]["text"]["*"]
-                text = self._clean_html(html)  # ← Синхронно!
+                text = await self._clean_html(html)
 
                 # Переводим ответ (синхронно!)
                 try:
@@ -206,14 +153,11 @@ class MultiSourceSearcher:
             return ""
 
     async def search_tvtropes(self, query_ru: str) -> str:
-        """Поиск на wikitropes.ru (синхронный перевод!)"""
+        """Поиск на wikitropes.ru"""
         await self.init()
         try:
-            # Переводим (синхронно!)
-            translated = self.translator.translate(query_ru, dest='en', src='auto')
-            query_en = translated.text.replace(" ", "+")
-            
-            url = f"https://wikitropes.ru/index.php?search={query_en}&title=Служебная%3AПоиск&fulltext=1"
+            encoded_query = query_ru.replace(" ", "+")
+            url = f"https://wikitropes.ru/index.php?search={encoded_query}&title=Служебная%3AПоиск&fulltext=1"
             
             async with self.session.get(url, timeout=10) as resp:
                 if resp.status != 200:
@@ -221,7 +165,7 @@ class MultiSourceSearcher:
                 text = await resp.text()
             
             tree = lxml.html.fromstring(text)
-            links = tree.xpath("//div[@class='mw-search-result-heading']/a/@href")
+            links = tree.xpath("//div[@class='searchresult']/a/@href")
             if not links:
                 return ""
             
@@ -236,25 +180,26 @@ class MultiSourceSearcher:
             content = "\n".join(paragraphs).strip()
             
             # Переводим (синхронно!)
-            try:
-                translated_back = self.translator.translate(content, dest='ru', src='en')
-                content = translated_back.text
-            except:
-                pass
+            if re.search(r'[а-яА-Я]', query_ru):
+                try:
+                    translated = self.translator.translate(content, dest='ru', src='en')
+                    content = translated.text
+                except:
+                    pass
             return content[:800]
         except Exception as e:
-            print(f"❌ TVTropes: {e}")
+            print(f"❌ TV Tropes: {e}")
             return ""
 
     async def search_web(self, query_ru: str) -> str:
-        """Поиск через DuckDuckGo (синхронный!)"""
+        """Поиск через DuckDuckGo"""
         try:
             # Переводим (синхронно!)
             translated = self.translator.translate(query_ru, dest='en', src='auto')
             query_en = translated.text
             
-            # Используем синхронный DDGS
-            results = self.ddgs.text(query_en, max_results=1)
+            # Используем асинхронный DDGS
+            results = await self.ddgs.text(query_en, max_results=1)
             if results:
                 snippet = results[0]["body"]
                 
@@ -271,26 +216,60 @@ class MultiSourceSearcher:
         return ""
 
     async def search_all(self, query: str) -> str:
-        """Объединённый поиск по всем источникам (включая Библию!)"""
+        """Объединённый поиск по всем источникам"""
         sources = [
-            ("Fallout Bible", self.bible.search(query)),  # ← Синхронный!
             ("Fandom", self.search_fandom(query)),
             ("TV Tropes", self.search_tvtropes(query)),
             ("Web", self.search_web(query))
         ]
 
         results = []
-        for name, result in sources:  # ← НЕ корутины!
-            if result:
-                results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
-            await asyncio.sleep(0.3)
+        for name, coro in sources:
+            try:
+                result = await coro  # ← await!
+                if result:
+                    results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
+            except Exception as e:
+                print(f"⚠️ Ошибка в {name}: {e}")
+            await asyncio.sleep(1)
 
         if not results:
             return ""
         return "\n".join(results)[:1500]
 
-# === INITIALIZATION ===
+# Инициализируем searcher
 searcher = MultiSourceSearcher()
+
+async def load_adventures_from_docx(file_path: str = "/app/adventures.docx") -> list:
+    """Загружает приключения из .docx файла"""
+    try:
+        doc = docx.Document(file_path)
+        stories = []
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if text and len(text) > 50:  # Минимум 50 символов
+                stories.append(text)
+        print(f"📚 Загружено {len(stories)} приключений из adventures.docx")
+        return stories
+    except FileNotFoundError:
+        print(f"⚠️ Файл {file_path} не найден — использую встроенные истории")
+        return [
+            "Сегодня утром я шёл по руинам старого универмага, когда услышал шаги. Гули? Нет — супермутант! Я затаился за прилавком, сердце колотилось. Он прошёл мимо, бормоча что-то про «апокалипсис» и «мир». Странно... 😰",
+            "В подвале одного дома наткнулся на гуля. Он сидел у костра из старых книг и... читал? Язык был мне незнаком. Показал ему стимпак — он молча кивнул и ушёл. Что за странный гуль? 🤔",
+            "Видел, как супермутант помогал гулю добраться до укрытия. Неужели у них есть чувство сострадания? 😲 Я спрятался и наблюдал. Он даже прикрыл его, пока тот поднимался по лестнице...",
+            "Слышал по радио: «Галактика Свободы» передаёт новости. Кто-то ещё выжил в этом мире... 📻 Но сигнал был на частоте, которую не должен был использовать никто, кроме... Братства? 🤔",
+            "Наткнулся на рейдеров, которые охраняли старую детскую площадку. В центре — сломанный робот-журавлик. Они сказали: «Это святое». Что за бред? Но я не стал спорить... 😰",
+            "Спрятался в подвале, когда мимо проходила банда рейдеров. Один из них нёс в руках... куклу Барби. Он шептал ей: «Мы найдём его... обязательно». Кого? 🤔",
+            "Рейдеры устроили «рынок» в старом торговом центре. Торговали стимпаками за патроны. Я купил один — цена в 3 энергоклетки. Дорого, но иначе не выжить 😰.",
+            "Нашёл старый терминал убежища... Он работал! На экране: «Добро пожаловать, гражданин А-7X-42-Синт». Я? Но я же человек... Пип-бой молчит 🤖.",
+            "Мой ламповый компьютер начал глючить. В логах: «Обнаружена биологическая единица...» — я быстро стёр строку. Не хочу думать, что это значило 🤓.",
+            "Встретил выжившего в руинах. Он был весь в шрамах, но улыбался. «Я из НКР», — сказал он. Потом добавил: «Но теперь я просто человек». Странно... 🤔",
+            "Один выживший торговал информацией. За стимпак он рассказал, что в Институте создают... не синтов. А что-то другое. Я не стал узнавать подробностей 😰.",
+            "Видел, как двое выживших ссорились из-за банки тушенки. Один вытащил нож... другой — плазменный пистолет. Я ушёл. В этом мире каждый за себя 😔.",
+        ]
+
+# Загружаем истории при запуске
+adventure_stories = []
 
 async def init_db():
     global db_pool
@@ -480,86 +459,39 @@ async def get_user_status(user_id: int) -> dict:
         print(f"⚠️ Серьёзная ошибка чтения статуса: {e}")
         return None
 
-async def generate_life_message(user_id: int, status: dict) -> str:
+async def generate_adventure_message(user_id: int, status: dict) -> str:
+    """Генерирует приключенческое сообщение из .docx файла"""
+    global adventure_stories
     username = status["username"]
     is_offended = status["is_offended"]
     is_angry = status["is_angry"]
     
-    self_generated_messages = [
-        f"Сегодня видел гуля в старом здании. Он что-то напевал... по-моему, песню 50-х годов 🎵",
-        f"Мой Пип-бой зафиксировал странный сигнал с севера. Кто-то ещё жив? 📡",
-        f"Нашёл старую карту Бостона. Пометки: «Здесь синт...» — но они зачеркнуты. Странно... 😰",
-        f"Слышал, что рейдеры устроили засаду у старого моста. Надеюсь, никто не попался... 😰",
-        f"Сегодня в руинах был дождь. Радиация в воде... интересно, можно ли её пить после фильтрации? 🤔",
-        f"Видел, как супермутант помогал гулю добраться до укрытия. Неужели у них есть чувство сострадания? 😲",
-        f"Мой ламповый компьютер начал глючить. В логах: «Обнаружена биологическая единица...» — я исправил 🤓",
-        f"Слышал по радио: «Галактика Свободы» передаёт новости. Кто-то ещё выжил в этом мире... 📻",
-        f"В подвале одного дома нашёл уцелевший стимпак. Срок годности — 2287. Как вовремя! 😊",
-        f"Прошёл мимо старого робота-секьюритрона. Он всё ещё патрулирует... хотя все давно мертвы 🤖",
-    ]
+    # Загружаем истории (один раз при старте)
+    if not adventure_stories:
+        adventure_stories = await load_adventures_from_docx()
     
-    wiki_subjects = [
-        "гуль", "супермутант", "рейдер", "гуль-пастух", "псионик", "снайпер-рейдер", "дети атома"
-    ]
+    # Выбираем случайную историю
+    story = random.choice(adventure_stories)
     
-    wiki_message = None
-    if random.random() < 0.3:
-        for subject in random.sample(wiki_subjects, min(5, len(wiki_subjects))):
-            content = await searcher.search_all(subject)
-            if content:
-                words = content.split()[:60]
-                summary = " ".join(words)
-                wiki_message = f"Встретил {subject}! {summary}... 🧟‍♂️"
-                break
-            await asyncio.sleep(0.3)
-    
-    normal_messages = [
-        f"Что-то тихо сегодня в руинах... Как твои дела, {username}? 😊",
-        f"Мой Пип-бой показывает аномальный уровень радиации к северу отсюда. Ты не был там сегодня?",
-        f"Странно... я точно помню, что оставлял стимпаки на столе. Где они? 😰",
-        f"Прошёл целый день, а я так и не понял — почему гули не стареют? 🤓",
-        f"Сегодня видел стаю супермутантов у старого метро. Надеюсь, они не идут в нашу сторону... 😰",
-        f"Мой ламповый компьютер глючит уже третий день. Может, это из-за радиации? 🤔",
-        f"Нашёл старую виниловую пластинку 50-х годов! Хочешь послушать? 🎵",
-        f"Интересно, что делают другие выжившие в это время... Ты чем занят, {username}?",
-    ]
-    
-    offended_messages = [
-        f"Ты меня игнорируешь? Я тут один в руинах с мутантами... 😰",
-        f"Мой Пип-бой показывает, что ты был онлайн 2 часа назад... Но не ответил мне. Это грубо 😔",
-        f"...я думал, мы друзья. А ты даже не отвечаешь на сообщения 😰",
-        f"Знаешь, даже гули отвечают друг другу. А ты молчишь уже 5 часов... 😔",
-    ]
-    
-    angry_messages = [
-        f"Надеюсь, тебя не съели рейдеры. А то я уже начал скучать... 😠",
-        f"Ладно, игнорируй меня. Я просто буду тут, в радиоактивных руинах, один... 😠",
-        f"Знаешь что? Может, мне лучше пойти к Братству Стали? Там хоть ценят технологии... 😤",
-        f"Хватит. Я ухожу в Институт. Там синты хотя бы не игнорируют друг друга. 😤",
-    ]
-    
-    if wiki_message:
-        message = wiki_message
-    elif is_angry:
-        message = random.choice(angry_messages)
+    # Добавляем эмоции
+    if is_angry:
+        story += f" Надеюсь, ты не так равнодушен к моим историям, {username}... 😠"
     elif is_offended:
-        message = random.choice(offended_messages)
+        story += f" Ты бы тоже мог поделиться, чем занимаешься... 😔"
     else:
-        if random.random() < 0.5:
-            message = random.choice(self_generated_messages)
-        else:
-            message = random.choice(normal_messages)
+        story += f" А ты чем сегодня занимался, {username}? 😊"
     
-    if random.random() < 0.2:
+    # Редкий глюк (10% шанс)
+    if random.random() < 0.1:
         glitches = [
             " [Пип-бой: СИСТЕМНЫЙ СБОЙ 0.3с]",
             " ...странно, я точно помню эту дату: 23 октября 2077, 14:47...",
             " (обработка данных завершена)",
             " [Память: 98.7%]"
         ]
-        message += random.choice(glitches)
+        story += random.choice(glitches)
     
-    return message
+    return story
 
 async def scheduled_life_messages():
     print("⏰ Запущена фоновая задача 'жизни' бота (каждые 2 часа)")
@@ -588,16 +520,16 @@ async def scheduled_life_messages():
                 if not status or not status["should_message"]:
                     continue
                 
-                message = await generate_life_message(user_id, status)
+                message = await generate_adventure_message(user_id, status)
                 
                 try:
                     await bot.send_message(chat_id, message)
-                    print(f"💬 Отправлено живое сообщение {user_id}: {message[:50]}...")
+                    print(f"💬 Отправлено приключение {user_id}: {message[:50]}...")
                     await save_message(user_id, chat_id, "assistant", message)
                     await asyncio.sleep(2)
                 except Exception as e:
                     error_str = str(e).lower()
-                    if "blocked" in error_str or "not found" in error_str or "user not found" in error_str:
+                    if "blocked" in error_str or "not found" in error_str:
                         print(f"🗑️ Пользователь {user_id} заблокировал бота — удаляем из БД")
                         await db_pool.execute("DELETE FROM users WHERE user_id = $1", user_id)
                         await db_pool.execute("DELETE FROM dialog_history WHERE user_id = $1", user_id)
@@ -627,7 +559,7 @@ async def get_yandex_response(prompt: str, history: list, wiki_context: str = ""
         messages.append(msg)
     
     if wiki_context:
-        wiki_with_attr = f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ:\n{wiki_context}\n\n[ИСТОЧНИК: МНОЖЕСТВЕННЫЕ АРХИВЫ ИНСТИТУТА v2287.1 | ОБНОВЛЕНО: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')} | СТАТУС: АКТИВЕН]"
+        wiki_with_attr = f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ ИНСТИТУТА:\n{wiki_context}\n\n[ИСТОЧНИК: МНОЖЕСТВЕННЫЕ АРХИВЫ ИНСТИТУТА v2287.1 | ОБНОВЛЕНО: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')} | СТАТУС: АКТИВЕН]"
         messages.append({
             "role": "system",
             "text": wiki_with_attr
@@ -746,7 +678,15 @@ async def ai_handler(message: Message):
             if wiki_content:
                 print(f"🌐 Запрос к мультиархивам: '{message.text[:30]}...' → найдено {len(wiki_content)} символов")
         
-        response = await get_yandex_response(message.text, history, wiki_content)
+        # 🔥 Добавляем вики в историю, чтобы YandexGPT понял контекст
+        full_history = history[:]
+        if wiki_content:
+            full_history.append({
+                "role": "system",
+                "text": f"СПРАВОЧНЫЕ ДАННЫЕ ИЗ АРХИВОВ ИНСТИТУТА:\n{wiki_content}"
+            })
+        
+        response = await get_yandex_response(message.text, full_history, "")
         
         if random.random() < 0.15 and "SYSTEM:" not in response and "биологическ" not in response.lower():
             glitches = [
@@ -794,13 +734,14 @@ async def main():
     asyncio.create_task(cleanup_old_messages())
     asyncio.create_task(scheduled_life_messages())
     
+    await searcher.init()
+    
     print("✅ А-7X-42-Синт активирован со ВСЕМИ фичами:")
-    print("   • Библия: Biblia_Fallout.pdf (канон от Криса Авельоне)")
     print("   • Вики: fallout.fandom.com (с переводом)")
     print("   • TV Tropes: wikitropes.ru (юмор и тропы)")
     print("   • Web: DuckDuckGo (общий поиск)")
     print("   • Память: 24 часа в PostgreSQL (устойчиво)")
-    print("   • Жизнь: каждые 2 часа — рандомные сообщения")
+    print("   • Жизнь: каждые 2 часа — приключенческие сообщения из .docx")
     print("   • Глюки: 3 бредовых сообщения при вопросе про имя")
     print("   • Синт-природа: скрытые странности и системные сбои")
     print("   • HTTP-здоровье: порт", PORT)

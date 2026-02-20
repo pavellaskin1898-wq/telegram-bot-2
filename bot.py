@@ -659,22 +659,8 @@ async def start_handler(message: Message):
         parse_mode="Markdown"
     )
 
-@dp.message(Command("clear"))
-async def clear_handler(message: Message):
-    try:
-        deleted = await db_pool.execute(
-            "DELETE FROM dialog_history WHERE user_id = $1",
-            message.from_user.id
-        )
-        await message.answer("🧠 Память очищена! Готов к новому диалогу 😊")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка очистки: {str(e)}")
-
 @dp.message(AllowedUsersFilter())
 async def ai_handler(message: Message):
-    if message.content_type != "text" or not message.text:
-        return
-
     # === ПРОВЕРЯЕМ, ГДЕ СООБЩЕНИЕ ===
     chat_id_str = str(message.chat.id)
     
@@ -688,7 +674,7 @@ async def ai_handler(message: Message):
         )
         
         if not (bot_mentioned or replied_to_bot):
-            return
+            return  # ← Не отвечаем, если не упомянут или не ответ
 
     # Для группы: то же самое
     elif GROUP_ID and chat_id_str == str(GROUP_ID):
@@ -713,6 +699,10 @@ async def ai_handler(message: Message):
         
         if not (bot_mentioned or replied_to_bot):
             return
+
+    # === ОБРАБАТЫВАЕМ СООБЩЕНИЕ ===
+    if message.content_type != "text" or not message.text:
+        return
 
     try:
         await save_message(message.from_user.id, message.chat.id, "user", message.text)

@@ -255,7 +255,15 @@ def load_adventures_from_docx(file_path: str = "/app/adventures.docx") -> list:
         for para in doc.paragraphs:
             text = para.text.strip()
             if text:  # ← Только не пустой текст, без ограничений
-                stories.append(text)
+                # Убираем мусорные заголовки вроде "**История 26:**"
+                clean_text = re.sub(r'^\*\*История \d+:\s*', '', text)
+                clean_text = re.sub(r'^\d+\.\s*', '', clean_text)
+                clean_text = re.sub(r'^—\s*', '', clean_text)
+                clean_text = re.sub(r'^\*\*.*?\*\*', '', clean_text)
+                clean_text = re.sub(r'\*\*$', '', clean_text)
+                clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                if clean_text:
+                    stories.append(clean_text)
         adventure_stories = stories
         print(f"📚 Загружено {len(stories)} приключений из adventures.docx")
         return stories
@@ -310,6 +318,19 @@ def load_adventures_from_docx(file_path: str = "/app/adventures.docx") -> list:
             "Прошёл мимо старого робота-секьюритрона. Он всё ещё патрулирует... хотя все давно мертвы 🤖",
             "Спрятался в подвале, когда мимо проходила банда рейдеров. Один из них нёс в руках... куклу Барби. Он шептал ей: «Мы найдём его... обязательно». Кого? 🤔",
             "Рейдеры устроили «рынок» в старом торговом центре. Торговали стимпаками за патроны. Я купил один — цена в 3 энергоклетки. Дорого, но иначе не выжить 😰.",
+            "Мой ламповый компьютер начал глючить. В логах: «Обнаружена биологическая единица...» — я исправил 🤓",
+            "Видел, как двое рейдеров ссорились из-за банки тушенки. Один вытащил нож... другой — плазменный пистолет. Я ушёл. В этом мире каждый за себя 😔.",
+            "Наткнулся на рейдеров, которые охраняли старую детскую площадку. В центре — сломанный робот-журавлик. Они сказали: «Это святое». Что за бред? Но я не стал спорить... 😰",
+            "Слышал по радио: «Галактика Свободы» передаёт новости. Кто-то ещё выжил в этом мире... 📻 Но сигнал был на частоте, которую не должен был использовать никто, кроме... Братства? 🤔",
+            "Встретил выжившего в руинах. Он был весь в шрамах, но улыбался. «Я из НКР», — сказал он. Потом добавил: «Но теперь я просто человек». Странно... 🤔",
+            "Один выживший торговал информацией. За стимпак он рассказал, что в Институте создают... не синтов. А что-то другое. Я не стал узнавать подробности 😰.",
+            "Видел, как супермутант сидел у костра и... пел? Голос был хриплый, но мелодия... похожа на старую песню 50-х. Я не стал подходить 🎵.",
+            "Нашёл старую виниловую пластинку 50-х годов! Хочешь послушать? 🎵",
+            "Сегодня в руинах был дождь. Радиация в воде... интересно, можно ли её пить после фильтрации? 🤔",
+            "Прошёл целый день, а я так и не понял — почему гули не стареют? 🤓",
+            "Сегодня видел стаю супермутантов у старого метро. Надеюсь, они не идут в нашу сторону... 😰",
+            "Мой ламповый компьютер глючит уже третий день. Может, это из-за радиации? 🤔",
+            "Интересно, что делают другие выжившие в это время... Ты чем занят?",
         ]
         return adventure_stories
 
@@ -503,41 +524,35 @@ async def get_user_status(user_id: int) -> dict:
         print(f"⚠️ Серьёзная ошибка чтения статуса: {e}")
         return None
 
-async def generate_adventure_message(status: dict = None) -> str:
-    """Генерирует приключенческое сообщение из .docx файла (без фильтров)"""
-    username = status["username"] if status else "выживший"
-    is_offended = status["is_offended"] if status else False
-    is_angry = status["is_angry"] if status else False
-    
-    # 🔥 Берём случайную историю из .docx (любую!)
-    if adventure_stories:
-        story = random.choice(adventure_stories)
-    else:
-        # Если .docx не загрузился — не придумываем фразу, просто выходим
+async def generate_adventure_message(is_channel: bool = False, username: str = "выживший") -> str:
+    """Генерирует приключенческое сообщение — как живой человек: один блок, без заголовков"""
+    if not adventure_stories:
         return ""
+
+    story = random.choice(adventure_stories).strip()
     
-    # Добавляем эмоции (только для лички)
-    if status and chat_id == user_id:  # ← Если это личка
-        if is_angry:
-            story += f" Надеюсь, ты не так равнодушен к моим историям, {username}... 😠"
-        elif is_offended:
-            story += f" Ты бы тоже мог поделиться, чем занимаешься... 😔"
-        else:
-            story += f" А ты чем сегодня занимался, {username}? 😊"
-    # В канале и группе — только история
+    # Добавляем эмоции только для лички
+    if not is_channel:
+        # 30% шанс на глюк
+        if random.random() < 0.3:
+            glitches = [
+                " [Пип-бой: СИСТЕМНЫЙ СБОЙ 0.3с]",
+                " ...странно, я точно помню эту дату: 23 октября 2077, 14:47...",
+                " (обработка данных завершена)",
+                " [Память: 98.7%]"
+            ]
+            story += random.choice(glitches)
+
+        # Эмоции (только в личке)
+        if random.random() < 0.5:  # 50% шанс добавить вопрос/эмоцию
+            if random.random() < 0.5:
+                story += f" А ты чем сегодня занимался, {username}? 😊"
+            else:
+                story += f" Как ты думаешь, это правда? 🤔"
     else:
+        # В канале — только чистая история + подпись
         story += " 🧟‍♂️ Из руин Бостона"
-    
-    # 30% шанс на глюк
-    if random.random() < 0.3:
-        glitches = [
-            " [Пип-бой: СИСТЕМНЫЙ СБОЙ 0.3с]",
-            " ...странно, я точно помню эту дату: 23 октября 2077, 14:47...",
-            " (обработка данных завершена)",
-            " [Память: 98.7%]"
-        ]
-        story += random.choice(glitches)
-    
+
     return story
 
 async def scheduled_life_messages():
@@ -550,7 +565,7 @@ async def scheduled_life_messages():
             # === ПИШЕМ В КАНАЛ ===
             if CHANNEL_ID:
                 try:
-                    channel_message = await generate_adventure_message()  # ← Без статуса!
+                    channel_message = await generate_adventure_message(is_channel=True)
                     if channel_message:  # ← Проверяем, что не пустая строка
                         await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
                         print(f"📢 Отправлено в канал {CHANNEL_ID}: {channel_message[:50]}...")
@@ -589,7 +604,10 @@ async def scheduled_life_messages():
                 if not status or not status["should_message"]:
                     continue
                 
-                message = await generate_adventure_message(status)
+                message = await generate_adventure_message(
+                    is_channel=False,
+                    username=status["username"]
+                )
                 
                 try:
                     await bot.send_message(chat_id, message, parse_mode="Markdown")

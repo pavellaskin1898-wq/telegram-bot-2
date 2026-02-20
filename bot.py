@@ -14,11 +14,10 @@ import sys
 from urllib.parse import urlparse
 from asyncpg.exceptions import InterfaceError, ConnectionDoesNotExistError
 import time
-from googletrans import Translator  # ← Синхронный!
-from duckduckgo_search import DDGS  # ← Синхронный!
+from googletrans import Translator
+from duckduckgo_search import AsyncDDGS
 import lxml.html
 import docx  # ← Для .docx
-import fitz  # ← Для .pdf (если нужен)
 
 # === ENVIRONMENT VARIABLES ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -35,8 +34,8 @@ dp = Dispatcher()
 
 db_pool = None
 shutdown_event = asyncio.Event()
-translator = Translator()  # ← Глобальный синхронный
-ddgs = DDGS()  # ← Глобальный синхронный
+translator = Translator()
+ddgs = AsyncDDGS()
 
 def graceful_shutdown(signum, frame):
     print("🛑 Получен сигнал завершения — останавливаем бота...")
@@ -74,65 +73,11 @@ SYSTEM_PROMPT = """Ты — А-7X-42-Синт, выживший в постап�
 4. Если спросят «Ты синт?» — ответь с паникой: «Что? Нет... радиация глючит 😰»
 5. Если спросят про имя — сначала 3 бредовых сообщения, потом нормальный ответ"""
 
-class BibleSearcher:
-    def __init__(self, path: str = "/app/Biblia_Fallout.pdf"):
-        self.path = path
-        self.content = ""
-        self.load_bible()
-
-    def load_bible(self):
-        """Синхронная загрузка Библии из PDF"""
-        try:
-            doc = fitz.open(self.path)
-            text = ""
-            for page in doc:
-                text += page.get_text() + "\n"
-            doc.close()
-            self.content = text
-            print(f"📚 Библия Фоллаута загружена ({len(text)} символов)")
-        except FileNotFoundError:
-            print(f"⚠️ Файл Библии не найден: {self.path}")
-            self.content = ""
-        except Exception as e:
-            print(f"❌ Ошибка загрузки Библии: {e}")
-            self.content = ""
-
-    def search(self, query_ru: str) -> str:
-        """Поиск в Библии по фразе (синхронно)"""
-        if not self.content:
-            return ""
-
-        try:
-            translated = translator.translate(query_ru, dest='en', src='auto')
-            query_en = translated.text.lower()
-        except:
-            query_en = query_ru.lower()
-
-        lines = self.content.split('\n')
-        matches = []
-        for line in lines:
-            if query_en in line.lower():
-                index = lines.index(line)
-                start = max(0, index - 2)
-                end = min(len(lines), index + 3)
-                context = "\n".join(lines[start:end]).strip()
-                matches.append(context)
-
-        if not matches:
-            return ""
-
-        result = "\n\n".join(matches[:2])
-        try:
-            translated_back = translator.translate(result, dest='ru', src='en')
-            result = translated_back.text
-        except:
-            pass
-        return result[:800]
-
 class MultiSourceSearcher:
     def __init__(self):
         self.session = None
-        self.bible = BibleSearcher()  # ← Подключаем Библию!
+        self.last_call = 0
+        self.cooldown = 5  # секунд между запросами
         self.ddgs = ddgs
         self.translator = translator
 
@@ -158,7 +103,7 @@ class MultiSourceSearcher:
         return text.strip()
 
     async def search_fandom(self, query_ru: str) -> str:
-        """Поиск на fallout.fandom.com (синхронный перевод!)"""
+        """Поиск на fallout.fandom.com (исправлено!)"""
         await self.init()
         try:
             # Переводим (синхронно!)
@@ -198,7 +143,7 @@ class MultiSourceSearcher:
                     return ""
                 
                 html = data["parse"]["text"]["*"]
-                text = await self._clean_html(html)  # ← await!
+                text = await self._clean_html(html)
 
                 # Переводим (синхронно!)
                 try:
@@ -212,7 +157,7 @@ class MultiSourceSearcher:
             return ""
 
     async def search_tvtropes(self, query_ru: str) -> str:
-        """Поиск на wikitropes.ru (синхронный перевод!)"""
+        """Поиск на wikitropes.ru (исправлено!)"""
         await self.init()
         try:
             encoded_query = query_ru.replace(" ", "+")
@@ -275,39 +220,41 @@ class MultiSourceSearcher:
         return ""
 
     async def search_all(self, query: str) -> str:
-        """Объединённый поиск по всем источникам (включая Библию!)"""
+        """Объединённый поиск по всем источникам (исправлено!)"""
         sources = [
-            ("Fallout Bible", self.bible.search(query)),  # ← Синхронно!
             ("Fandom", self.search_fandom(query)),
             ("TV Tropes", self.search_tvtropes(query)),
             ("Web", self.search_web(query))
         ]
 
         results = []
-        for name, result in sources:  # ← НЕ корутины!
-            if result:
-                results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
-            await asyncio.sleep(0.3)
+        for name, coro in sources:
+            try:
+                result = await coro  # ← await!
+                if result:
+                    results.append(f"[ИСТОЧНИК: {name}]\n{result}\n")
+            except Exception as e:
+                print(f"⚠️ Ошибка в {name}: {e}")
+            await asyncio.sleep(1)
 
         if not results:
             return ""
         return "\n".join(results)[:1500]
 
-# Инициализируем searcher
 searcher = MultiSourceSearcher()
 
-# === ЗАГРУЗКА ИСТОРИЙ ИЗ .docx ===
+# === ЗАГРУЗКА ИСТОРИЙ ИЗ .docx (без фильтров!) ===
 adventure_stories = []
 
 def load_adventures_from_docx(file_path: str = "/app/adventures.docx") -> list:
-    """Синхронная загрузка приключений из .docx файла"""
+    """Синхронная загрузка приключений из .docx файла (без фильтров)"""
     global adventure_stories
     try:
         doc = docx.Document(file_path)
         stories = []
         for para in doc.paragraphs:
             text = para.text.strip()
-            if text and len(text) > 50 and len(text) < 100:  # Минимум 50, максимум 100 символов
+            if text:  # ← Только не пустой текст, без ограничений
                 stories.append(text)
         adventure_stories = stories
         print(f"📚 Загружено {len(stories)} приключений из adventures.docx")
@@ -353,6 +300,16 @@ def load_adventures_from_docx(file_path: str = "/app/adventures.docx") -> list:
             "Встретил выжившего в руинах. Он был весь в шрамах, но улыбался. «Я из НКР», — сказал он. Потом добавил: «Но теперь я просто человек». Странно... 🤔",
             "Один выживший торговал информацией. За стимпак он рассказал, что в Институте создают... не синтов. А что-то другое. Я не стал узнавать подробности 😰.",
             "Видел, как супермутант сидел у костра и... пел? Голос был хриплый, но мелодия... похожа на старую песню 50-х. Я не стал подходить 🎵.",
+            "Нашёл старую виниловую пластинку 50-х годов! Хочешь послушать? 🎵",
+            "Сегодня в руинах был дождь. Радиация в воде... интересно, можно ли её пить после фильтрации? 🤔",
+            "Прошёл целый день, а я так и не понял — почему гули не стареют? 🤓",
+            "Сегодня видел стаю супермутантов у старого метро. Надеюсь, они не идут в нашу сторону... 😰",
+            "Мой ламповый компьютер глючит уже третий день. Может, это из-за радиации? 🤔",
+            "Интересно, что делают другие выжившие в это время... Ты чем занят?",
+            "В подвале одного дома нашёл уцелевший стимпак. Срок годности — 2287. Как вовремя! 😊",
+            "Прошёл мимо старого робота-секьюритрона. Он всё ещё патрулирует... хотя все давно мертвы 🤖",
+            "Спрятался в подвале, когда мимо проходила банда рейдеров. Один из них нёс в руках... куклу Барби. Он шептал ей: «Мы найдём его... обязательно». Кого? 🤔",
+            "Рейдеры устроили «рынок» в старом торговом центре. Торговали стимпаками за патроны. Я купил один — цена в 3 энергоклетки. Дорого, но иначе не выжить 😰.",
         ]
         return adventure_stories
 
@@ -546,32 +503,32 @@ async def get_user_status(user_id: int) -> dict:
         print(f"⚠️ Серьёзная ошибка чтения статуса: {e}")
         return None
 
-async def generate_adventure_message(status: dict) -> str:
-    """Генерирует уникальное приключенческое сообщение из .docx файла"""
-    username = status["username"]
-    is_offended = status["is_offended"]
-    is_angry = status["is_angry"]
+async def generate_adventure_message(status: dict = None) -> str:
+    """Генерирует приключенческое сообщение из .docx файла (без фильтров)"""
+    username = status["username"] if status else "выживший"
+    is_offended = status["is_offended"] if status else False
+    is_angry = status["is_angry"] if status else False
     
-    # 🔥 Берём случайную историю из .docx
+    # 🔥 Берём случайную историю из .docx (любую!)
     if adventure_stories:
         story = random.choice(adventure_stories)
     else:
-        story = random.choice([
-            "Сегодня видел гуля в старом здании. Он что-то напевал... по-моему, песню 50-х годов 🎵",
-            "Мой Пип-бой зафиксировал странный сигнал с севера. Кто-то ещё жив? 📡",
-            "Нашёл старую карту Бостона. Пометки: «Здесь синт...» — но они зачеркнуты. Странно... 😰",
-            "Слышал, что рейдеры устроили засаду у старого моста. Надеюсь, никто не попался... 😰",
-        ])
+        # Если .docx не загрузился — не придумываем фразу, просто выходим
+        return ""
     
-    # Добавляем эмоции
-    if is_angry:
-        story += f" Надеюсь, ты не так равнодушен к моим историям, {username}... 😠"
-    elif is_offended:
-        story += f" Ты бы тоже мог поделиться, чем занимаешься... 😔"
+    # Добавляем эмоции (только для лички)
+    if status and chat_id == user_id:  # ← Если это личка
+        if is_angry:
+            story += f" Надеюсь, ты не так равнодушен к моим историям, {username}... 😠"
+        elif is_offended:
+            story += f" Ты бы тоже мог поделиться, чем занимаешься... 😔"
+        else:
+            story += f" А ты чем сегодня занимался, {username}? 😊"
+    # В канале и группе — только история
     else:
-        story += f" А ты чем сегодня занимался, {username}? 😊"
+        story += " 🧟‍♂️ Из руин Бостона"
     
-    # 30% шанс на глюк (всегда!)
+    # 30% шанс на глюк
     if random.random() < 0.3:
         glitches = [
             " [Пип-бой: СИСТЕМНЫЙ СБОЙ 0.3с]",
@@ -593,10 +550,10 @@ async def scheduled_life_messages():
             # === ПИШЕМ В КАНАЛ ===
             if CHANNEL_ID:
                 try:
-                    status = {"username": "канал"}
-                    channel_message = await generate_adventure_message(status)
-                    await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
-                    print(f"📢 Отправлено в канал {CHANNEL_ID}: {channel_message[:50]}...")
+                    channel_message = await generate_adventure_message()  # ← Без статуса!
+                    if channel_message:  # ← Проверяем, что не пустая строка
+                        await bot.send_message(CHANNEL_ID, channel_message, parse_mode="Markdown")
+                        print(f"📢 Отправлено в канал {CHANNEL_ID}: {channel_message[:50]}...")
                 except Exception as e:
                     error_str = str(e).lower()
                     if "not found" in error_str or "chat not found" in error_str:
@@ -605,22 +562,6 @@ async def scheduled_life_messages():
                         print(f"⚠️ Бот не админ в канале: {CHANNEL_ID}")
                     else:
                         print(f"⚠️ Ошибка отправки в канал: {e}")
-            
-            # === ПИШЕМ В ГРУППУ ===
-            if GROUP_ID:
-                try:
-                    status = {"username": "группа"}
-                    group_message = await generate_adventure_message(status)
-                    await bot.send_message(GROUP_ID, group_message, parse_mode="Markdown")
-                    print(f"👥 Отправлено в группу {GROUP_ID}: {group_message[:50]}...")
-                except Exception as e:
-                    error_str = str(e).lower()
-                    if "not found" in error_str or "chat not found" in error_str:
-                        print(f"❌ Группа не найдена: {GROUP_ID}")
-                    elif "not admin" in error_str or "admin" in error_str:
-                        print(f"⚠️ Бот не админ в группе: {GROUP_ID}")
-                    else:
-                        print(f"⚠️ Ошибка отправки в группу: {e}")
             
             # === ПИШЕМ В ЛИЧКУ ===
             users = await db_pool.fetch(
@@ -639,6 +580,10 @@ async def scheduled_life_messages():
                 
                 user_id = user['user_id']
                 chat_id = user['chat_id']
+                
+                # Пропускаем, если это канал или группа
+                if str(chat_id) == CHANNEL_ID or str(chat_id) == GROUP_ID:
+                    continue
                 
                 status = await get_user_status(user_id)
                 if not status or not status["should_message"]:
@@ -832,7 +777,6 @@ async def ai_handler(message: Message):
         
         response = await get_yandex_response(message.text, history, wiki_content)
         
-        # 30% шанс на глюк (всегда!)
         if random.random() < 0.3 and "SYSTEM:" not in response and "биологическ" not in response.lower():
             glitches = [
                 " [Пип-бой: СИСТЕМНЫЙ СБОЙ 0.3с]",
@@ -884,13 +828,14 @@ async def main():
     await searcher.init()
     
     print("✅ А-7X-42-Синт активирован со ВСЕМИ фичами:")
-    print("   • Библия: Biblia_Fallout.pdf (канон от Криса Авельоне)")
+    print("   • Приключения: из adventures.docx (любые строки, без фильтров)")
     print("   • Вики: fallout.fandom.com (с переводом)")
     print("   • TV Tropes: wikitropes.ru (юмор и тропы)")
     print("   • Web: DuckDuckGo (общий поиск)")
     print("   • Память: 24 часа в PostgreSQL (устойчиво)")
-    print("   • Жизнь: каждые 2 часа — рандомные сообщения из .docx в личку И в канал")
-    print("   • Канал: отвечает на упоминания и ответы")
+    print("   • Жизнь: каждые 2 часа — рандомные сообщения из .docx")
+    print("   • Канал: каждые 2 часа — своё сообщение (только истории)")
+    print("   • Личка: каждые 2 часа — история + вопрос (как живой человек)")
     print("   • Глюки: 3 бредовых сообщения при вопросе про имя + 30% шанс на глюк в любом сообщении")
     print("   • Синт-природа: скрытые странности и системные сбои")
     print("   • HTTP-здоровье: порт", PORT)

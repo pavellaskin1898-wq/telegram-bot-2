@@ -462,7 +462,7 @@ async def get_user_status(user_id: int) -> dict:
             "hours_since_seen": hours_since_seen,
             "is_offended": hours_since_reply > 4 and hours_since_seen < 1,
             "is_angry": hours_since_reply > 12 and hours_since_seen < 2,
-            "should_message": hours_since_bot_msg > 2
+            "should_message": hours_since_bot_msg > 4  # ← Изменено: было `> 2`
         }
         
         return status
@@ -505,7 +505,7 @@ async def generate_adventure_message(is_channel: bool = False, username: str = "
     return story
 
 async def scheduled_life_messages():
-    print("⏰ Запущена фоновая задача 'жизни' бота (каждые 2 часа)")
+    print("⏰ Запущена фоновая задача 'жизни' бота (каждые 4 часа)")
     
     while not shutdown_event.is_set():
         try:
@@ -535,7 +535,7 @@ async def scheduled_life_messages():
                 ORDER BY last_message_from_bot ASC
                 LIMIT 10
                 ''',
-                now - timedelta(hours=2)
+                now - timedelta(hours=4)  # ← Изменено: было `hours=2`
             )
             
             for user in users:
@@ -552,6 +552,36 @@ async def scheduled_life_messages():
                 status = await get_user_status(user_id)
                 if not status or not status["should_message"]:
                     continue
+                
+                message = await generate_adventure_message(
+                    is_channel=False,
+                    username=status["username"]
+                )
+                
+                try:
+                    await bot.send_message(chat_id, message, parse_mode="Markdown")
+                    print(f"💬 Отправлено живое сообщение {user_id}: {message[:50]}...")
+                    await save_message(user_id, chat_id, "assistant", message)
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if "blocked" in error_str or "not found" in error_str or "user not found" in error_str:
+                        print(f"🗑️ Пользователь {user_id} заблокировал бота — удаляем из БД")
+                        await db_pool.execute("DELETE FROM users WHERE user_id = $1", user_id)
+                        await db_pool.execute("DELETE FROM dialog_history WHERE user_id = $1", user_id)
+            
+            try:
+                # ← Изменено: 14400 = 4 часа в секундах
+                await asyncio.wait_for(shutdown_event.wait(), timeout=14400)
+            except asyncio.TimeoutError:
+                continue
+                
+        except Exception as e:
+            print(f"⚠️ Ошибка в фоновой задаче: {e}")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=300)
+            except asyncio.TimeoutError:
+                continue
                 
                 message = await generate_adventure_message(
                     is_channel=False,
